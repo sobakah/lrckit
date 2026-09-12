@@ -15,6 +15,9 @@
   "cleaning": {
     "feature_regex": "[\\[\\(][\\s]*(?:feat\\.?|featuring|ft\\.?)\\s+[^\\)\\]]+[\\)\\]]",
     "trailing_feature_regex": "\\s+(?:feat\\.?|featuring|ft\\.?)\\s+.*$",
+    "korean_bracket_regex": "[\\[\\(][^\\)\\]]*[가-힣ㄱ-ㅎㅏ-ㅣ][^\\)\\]]*[\\]\\)]",
+    "japanese_bracket_regex": "[\\[\\(][^\\)\\]]*[ぁ-ゖァ-ヺ一-龥][^\\)\\]]*[\\]\\)]",
+    "chinese_bracket_regex": "[\\[\\(][^\\)\\]]*[一-龥][^\\)\\]]*[\\]\\)]",
     "ignore_words_artist_match": ["the", "and", "feat", "ft", "with", "&"]
   },
   "api": {
@@ -25,10 +28,13 @@
     "netease_search_limit": 6,
     "user_agent": "LyricsTagger/2.2"
   },
-  "settings": {
-    "supported_extensions": [".flac", ".mp3"],
+   "settings": {
+    "supported_extensions": [".flac", ".mp3", ".ogg", ".opus", ".m4a"],
     "default_editor": "nano",
     "preview_lines": 16,
-    "non_latin_ratio_threshold": 0.25
+    "non_latin_ratio_threshold": 0.25,
+    "max_search_depth": 3,
+    "max_file_count": 250
   }
 }
+

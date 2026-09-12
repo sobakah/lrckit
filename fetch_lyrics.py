@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import json
+import glob
 import argparse
 import subprocess
 import tempfile
@@ -13,6 +14,9 @@ import readline
 import requests
 
 from mutagen.flac import FLAC
+from mutagen.oggvorbis import OggVorbis
+from mutagen.oggopus import OggOpus
+from mutagen.mp4 import MP4
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, USLT
 
@@ -49,7 +53,7 @@ try:
 except ImportError:
     HAS_ANYASCII = False
 
-# --- Default-Konfiguration (Fallback falls keine config.json existiert) ---
+# --- Default configuration (fallback if config.json does not exist) ---
 DEFAULT_CONFIG = {
     "aliases": [
         ["tomorrow x together", "txt", "투모로우바이투게더"],
@@ -63,6 +67,9 @@ DEFAULT_CONFIG = {
     "cleaning": {
         "feature_regex": r"[\(\[][\s]*(?:feat\.?|featuring|ft\.?)\s+[^\)\]]+[\)\]]",
         "trailing_feature_regex": r"\s+(?:feat\.?|featuring|ft\.?)\s+.*$",
+        "korean_bracket_regex": r"[\(\[][^\)\]]*[가-힣ㄱ-ㅎㅏ-ㅣ][^\)\]]*[\)\]]",
+        "japanese_bracket_regex": r"[\(\[][^\)\]]*[ぁ-ゖァ-ヺ一-龥][^\)\]]*[\)\]]",
+        "chinese_bracket_regex": r"[\(\[][^\)\]]*[一-龥][^\)\]]*[\)\]]",
         "ignore_words_artist_match": ["the", "and", "feat", "ft", "with", "&"]
     },
     "api": {
@@ -71,18 +78,19 @@ DEFAULT_CONFIG = {
         "netease_lyric_url": "https://music.163.com/api/song/lyric",
         "timeout_seconds": 6,
         "netease_search_limit": 6,
-        "user_agent": "LyricsTagger/2.2"
+        "user_agent": "LyricsTagger/2.5"
     },
     "settings": {
-        "supported_extensions": [".flac", ".mp3"],
+        "supported_extensions": [".flac", ".mp3", ".ogg", ".opus", ".m4a"],
         "default_editor": "nano",
         "preview_lines": 16,
-        "non_latin_ratio_threshold": 0.25
+        "non_latin_ratio_threshold": 0.25,
+        "max_search_depth": 3,
+        "max_file_count": 250
     }
 }
 
 def load_config() -> dict:
-    """Lädt Konfiguration aus config.json (Skriptpfad oder ~/.config/fetch-lyrics/)."""
     candidate_paths = [
         Path(__file__).resolve().parent / "config.json",
         Path.home() / ".config" / "fetch-lyrics" / "config.json"
@@ -96,7 +104,7 @@ def load_config() -> dict:
                     config.update(loaded)
                     return config
             except Exception as e:
-                print(f"\033[33mWarnung: Konfiguration '{path}' fehlerhaft, nutze Fallbacks: {e}\033[0m")
+                print(f"\033[33mWarning: Configuration file '{path}' invalid, using defaults: {e}\033[0m")
     return DEFAULT_CONFIG
 
 CONFIG = load_config()
@@ -124,29 +132,50 @@ def print_banner(text: str):
     print(f"{StyleUI.CYAN}{StyleUI.BOLD} {text}{StyleUI.RESET}")
     print(f"{StyleUI.CYAN}{StyleUI.BOLD}{'─' * 60}{StyleUI.RESET}")
 
-def safe_input(prompt: str = "") -> str:
+def safe_input(prompt: str = "", default_text: str = "") -> str:
     try:
+        if default_text and hasattr(readline, "set_startup_hook"):
+            readline.set_startup_hook(lambda: readline.insert_text(default_text))
         return input(prompt)
     except (KeyboardInterrupt, EOFError):
-        print(f"\n\n{StyleUI.YELLOW}Programm durch Benutzer beendet.{StyleUI.RESET}")
+        print(f"\n\n{StyleUI.YELLOW}Program aborted by user.{StyleUI.RESET}")
         sys.exit(0)
+    finally:
+        if hasattr(readline, "set_startup_hook"):
+            readline.set_startup_hook(None)
 
 def exit_script():
-    print(f"\n{StyleUI.YELLOW}Programm beendet.{StyleUI.RESET}")
+    print(f"\n{StyleUI.YELLOW}Program terminated.{StyleUI.RESET}")
     sys.exit(0)
 
-# --- Bereinigung & Künstler-Abgleich ---
+# --- Cleaning & Metadata ---
 def clean_tag(text: str) -> str:
     if not text:
         return ""
-    feat_pat = CONFIG["cleaning"].get("feature_regex")
-    trail_pat = CONFIG["cleaning"].get("trailing_feature_regex")
-    cleaned = re.sub(feat_pat, "", text, flags=re.IGNORECASE) if feat_pat else text
-    cleaned = re.sub(trail_pat, "", cleaned, flags=re.IGNORECASE) if trail_pat else cleaned
+
+    cleaning_cfg = CONFIG.get("cleaning", {})
+    feat_pat = cleaning_cfg.get("feature_regex")
+    trail_pat = cleaning_cfg.get("trailing_feature_regex")
+
+    cleaned = text
+    if feat_pat:
+        cleaned = re.sub(feat_pat, "", cleaned, flags=re.IGNORECASE)
+    if trail_pat:
+        cleaned = re.sub(trail_pat, "", cleaned, flags=re.IGNORECASE)
+
+    language_patterns = [
+        cleaning_cfg.get("korean_bracket_regex"),
+        cleaning_cfg.get("japanese_bracket_regex"),
+        cleaning_cfg.get("chinese_bracket_regex"),
+    ]
+
+    for pat in language_patterns:
+        if pat:
+            cleaned = re.sub(pat, "", cleaned)
+
     return re.sub(r"\s+", " ", cleaned).strip()
 
 def get_artist_aliases(artist: str) -> list:
-    """Gibt bekannte Aliase für einen Künstler zurück."""
     if not artist:
         return []
     art_lower = artist.lower()
@@ -175,7 +204,6 @@ def matches_artist(target_artist: str, candidate_artist: str) -> bool:
     c_words = set(re.findall(r"\w+", c)) - ignore_words
     return bool(t_words & c_words)
 
-# --- Text- & Romanisierungslogik ---
 def is_non_latin(text: str) -> bool:
     if not text:
         return False
@@ -232,14 +260,14 @@ def romanize_lyrics(lyrics: str, lang: str) -> str:
     return "\n".join(converted_lines)
 
 def prompt_romanization(lyrics: str) -> str:
-    print(f"\n{StyleUI.BOLD}Romanisierung auswählen:{StyleUI.RESET}")
-    print(f"  [{StyleUI.GREEN}1{StyleUI.RESET}] Koreanisch (Hangul -> Romaja) [{'Verfügbar' if HAS_KOREAN else 'Fehlt: pip install korean-romanizer'}]")
-    print(f"  [{StyleUI.GREEN}2{StyleUI.RESET}] Japanisch (Kanji/Kana -> Rōmaji) [{'Verfügbar' if HAS_KAKASI else 'Fehlt: pip install pykakasi'}]")
-    print(f"  [{StyleUI.GREEN}3{StyleUI.RESET}] Mandarin (Hanzi -> Pīnyīn) [{'Verfügbar' if HAS_PYPINYIN else 'Fehlt: pip install pypinyin'}]")
-    print(f"  [{StyleUI.GREEN}4{StyleUI.RESET}] Universell (anyascii) [{'Verfügbar' if HAS_ANYASCII else 'Fehlt: pip install anyascii'}]")
-    print(f"  [{StyleUI.YELLOW}c{StyleUI.RESET}] Abbrechen")
+    print(f"\n{StyleUI.BOLD}Select romanization language:{StyleUI.RESET}")
+    print(f"  [{StyleUI.GREEN}1{StyleUI.RESET}] Korean (Hangul -> Romaja) [{'Available' if HAS_KOREAN else 'Missing: pip install korean-romanizer'}]")
+    print(f"  [{StyleUI.GREEN}2{StyleUI.RESET}] Japanese (Kanji/Kana -> Rōmaji) [{'Available' if HAS_KAKASI else 'Missing: pip install pykakasi'}]")
+    print(f"  [{StyleUI.GREEN}3{StyleUI.RESET}] Mandarin (Hanzi -> Pīnyīn) [{'Available' if HAS_PYPINYIN else 'Missing: pip install pypinyin'}]")
+    print(f"  [{StyleUI.GREEN}4{StyleUI.RESET}] Universal (anyascii) [{'Available' if HAS_ANYASCII else 'Missing: pip install anyascii'}]")
+    print(f"  [{StyleUI.YELLOW}c{StyleUI.RESET}] Cancel")
 
-    sel = safe_input(f"{StyleUI.BOLD}Sprache wählen [1-4/c]: {StyleUI.RESET}").strip().lower()
+    sel = safe_input(f"{StyleUI.BOLD}Choose language [1-4/c]: {StyleUI.RESET}").strip().lower()
     mapping = {
         "1": ("ko", HAS_KOREAN, "korean-romanizer"),
         "2": ("ja", HAS_KAKASI, "pykakasi"),
@@ -252,39 +280,56 @@ def prompt_romanization(lyrics: str) -> str:
 
     lang_code, available, pkg_name = mapping[sel]
     if not available:
-        print(f"{StyleUI.RED}Paket '{pkg_name}' nicht installiert.{StyleUI.RESET}")
+        print(f"{StyleUI.RED}Package '{pkg_name}' is not installed.{StyleUI.RESET}")
         return lyrics
 
-    print(f"{StyleUI.CYAN}Wandle Textzeilen um...{StyleUI.RESET}")
+    print(f"{StyleUI.CYAN}Converting lyric lines...{StyleUI.RESET}")
     return romanize_lyrics(lyrics, lang_code)
 
-# --- Metadaten & Dateizugriff ---
 def get_track_metadata(file_path: Path):
     ext = file_path.suffix.lower()
     title, artist, album, duration = "", "", "", 0
     existing_lyrics = ""
 
-    if ext == ".flac":
-        audio = FLAC(file_path)
-        title = audio.get("title", [""])[0]
-        artist = audio.get("artist", [""])[0]
-        album = audio.get("album", [""])[0]
-        duration = int(audio.info.length)
-        existing_lyrics = audio.get("LYRICS", [""])[0] or audio.get("UNSYNCEDLYRICS", [""])[0]
+    try:
+        if ext in (".flac", ".ogg", ".opus"):
+            if ext == ".flac":
+                audio = FLAC(file_path)
+            elif ext == ".ogg":
+                audio = OggVorbis(file_path)
+            else:
+                audio = OggOpus(file_path)
 
-    elif ext == ".mp3":
-        audio = MP3(file_path, ID3=ID3)
-        title = str(audio.get("TIT2", ""))
-        artist = str(audio.get("TPE1", ""))
-        album = str(audio.get("TALB", ""))
-        duration = int(audio.info.length)
-        if audio.tags:
-            for tag in audio.tags.values():
-                if tag.FrameID == "USLT":
-                    existing_lyrics = str(tag.text)
-                    break
+            title = audio.get("title", [""])[0]
+            artist = audio.get("artist", [""])[0]
+            album = audio.get("album", [""])[0]
+            duration = int(audio.info.length) if audio.info else 0
+            existing_lyrics = audio.get("LYRICS", [""])[0] or audio.get("UNSYNCEDLYRICS", [""])[0]
 
-    return title.strip(), artist.strip(), album.strip(), duration, existing_lyrics.strip()
+        elif ext == ".mp3":
+            audio = MP3(file_path, ID3=ID3)
+            title = str(audio.get("TIT2", ""))
+            artist = str(audio.get("TPE1", ""))
+            album = str(audio.get("TALB", ""))
+            duration = int(audio.info.length) if audio.info else 0
+            if audio.tags:
+                for tag in audio.tags.values():
+                    if tag.FrameID == "USLT":
+                        existing_lyrics = str(tag.text)
+                        break
+
+        elif ext == ".m4a":
+            audio = MP4(file_path)
+            title = audio.get("\xa9nam", [""])[0]
+            artist = audio.get("\xa9ART", [""])[0]
+            album = audio.get("\xa9alb", [""])[0]
+            duration = int(audio.info.length) if audio.info else 0
+            existing_lyrics = audio.get("\xa9lyr", [""])[0]
+
+    except Exception:
+        pass
+
+    return str(title).strip(), str(artist).strip(), str(album).strip(), duration, str(existing_lyrics).strip()
 
 def open_editor(initial_content: str) -> str:
     fallback_editor = CONFIG["settings"].get("default_editor", "nano")
@@ -303,10 +348,16 @@ def open_editor(initial_content: str) -> str:
 
 def embed_lyrics(file_path: Path, lyrics: str):
     ext = file_path.suffix.lower()
-    if ext == ".flac":
-        audio = FLAC(file_path)
+    if ext in (".flac", ".ogg", ".opus"):
+        if ext == ".flac":
+            audio = FLAC(file_path)
+        elif ext == ".ogg":
+            audio = OggVorbis(file_path)
+        else:
+            audio = OggOpus(file_path)
         audio["LYRICS"] = lyrics
         audio.save()
+
     elif ext == ".mp3":
         audio = MP3(file_path, ID3=ID3)
         try:
@@ -317,10 +368,20 @@ def embed_lyrics(file_path: Path, lyrics: str):
         audio.tags.add(USLT(encoding=3, lang="eng", desc="", text=lyrics))
         audio.save()
 
+    elif ext == ".m4a":
+        audio = MP4(file_path)
+        audio["\xa9lyr"] = [lyrics]
+        audio.save()
+
 def delete_lyrics(file_path: Path):
     ext = file_path.suffix.lower()
-    if ext == ".flac":
-        audio = FLAC(file_path)
+    if ext in (".flac", ".ogg", ".opus"):
+        if ext == ".flac":
+            audio = FLAC(file_path)
+        elif ext == ".ogg":
+            audio = OggVorbis(file_path)
+        else:
+            audio = OggOpus(file_path)
         changed = False
         for tag in ["LYRICS", "UNSYNCEDLYRICS"]:
             if tag in audio:
@@ -328,37 +389,43 @@ def delete_lyrics(file_path: Path):
                 changed = True
         if changed:
             audio.save()
+
     elif ext == ".mp3":
         audio = MP3(file_path, ID3=ID3)
         if audio.tags:
             audio.tags.delall("USLT")
             audio.save()
 
+    elif ext == ".m4a":
+        audio = MP4(file_path)
+        if "\xa9lyr" in audio:
+            del audio["\xa9lyr"]
+            audio.save()
+
 def preview_text(text: str, max_lines: int = None):
     if max_lines is None:
         max_lines = CONFIG["settings"].get("preview_lines", 16)
     lines = text.splitlines()
-    print(f"\n{StyleUI.GRAY}┌─── VORSCHAU ({min(len(lines), max_lines)}/{len(lines)} Zeilen) ───{StyleUI.RESET}")
+    print(f"\n{StyleUI.GRAY}┌─── PREVIEW ({min(len(lines), max_lines)}/{len(lines)} lines) ───{StyleUI.RESET}")
     for line in lines[:max_lines]:
         print(f"{StyleUI.GRAY}│{StyleUI.RESET} {line}")
     if len(lines) > max_lines:
-        print(f"{StyleUI.GRAY}│ ... ({len(lines) - max_lines} weitere Zeilen){StyleUI.RESET}")
+        print(f"{StyleUI.GRAY}│ ... ({len(lines) - max_lines} more lines){StyleUI.RESET}")
     print(f"{StyleUI.GRAY}└{'─' * 42}{StyleUI.RESET}")
 
-# --- Provider 1: LRCLIB ---
+# --- Provider queries ---
 def query_lrclib(title: str, artist: str, album: str):
     clean_a = clean_tag(artist)
     clean_t = clean_tag(title)
     timeout = CONFIG["api"].get("timeout_seconds", 6)
     api_url = CONFIG["api"].get("lrclib_url", "https://lrclib.net/api")
-    headers = {"User-Agent": CONFIG["api"].get("user_agent", "LyricsTagger/2.2")}
+    headers = {"User-Agent": CONFIG["api"].get("user_agent", "LyricsTagger/2.5")}
 
     queries = []
     if clean_a:
         queries.append({"track_name": clean_t, "artist_name": clean_a})
         queries.append({"q": f"{clean_a} {clean_t}"})
         queries.append({"q": f"{clean_a} {clean_t} Romanized"})
-        # Dynamisch Aliase abfragen
         for alias in get_artist_aliases(clean_a):
             queries.append({"track_name": clean_t, "artist_name": alias})
             queries.append({"q": f"{alias} {clean_t}"})
@@ -384,7 +451,7 @@ def query_lrclib(title: str, artist: str, album: str):
                                 seen_ids.add(item_id)
                                 results.append(item)
             elif r.status_code in (500, 502, 503, 504):
-                errors.append(f"HTTP {r.status_code} ({r.reason or 'Server ausgelastet'})")
+                errors.append(f"HTTP {r.status_code} ({r.reason or 'Server busy'})")
             elif r.status_code == 429:
                 errors.append("HTTP 429 (Rate Limit)")
         except requests.Timeout:
@@ -394,7 +461,6 @@ def query_lrclib(title: str, artist: str, album: str):
 
     return results, list(dict.fromkeys(errors))
 
-# --- Provider 2: NetEase Cloud Music ---
 def query_netease(title: str, artist: str, track_duration: int = 0):
     clean_a = clean_tag(artist)
     clean_t = clean_tag(title)
@@ -488,7 +554,6 @@ def query_netease(title: str, artist: str, track_duration: int = 0):
 
     return results
 
-# --- Provider 3: syncedlyrics ---
 def query_syncedlyrics_provider(title: str, artist: str):
     if not HAS_SYNCEDLYRICS:
         return []
@@ -514,13 +579,12 @@ def query_syncedlyrics_provider(title: str, artist: str):
             continue
     return list(dict.fromkeys(results))
 
-# --- Sammler für alle Provider ---
 def collect_candidates(title: str, artist: str, album: str, track_duration: int):
     valid = []
     seen_texts = set()
     clean_a = clean_tag(artist)
 
-    # 1. LRCLIB abfragen
+    # 1. Query LRCLIB
     lrclib_items, errors = query_lrclib(title, artist, album)
     for item in lrclib_items:
         synced = bool(item.get("syncedLyrics"))
@@ -551,7 +615,7 @@ def collect_candidates(title: str, artist: str, album: str, track_duration: int)
             "match_artist": matches_artist(clean_a, item_artist)
         })
 
-    # 2. NetEase abfragen
+    # 2. Query NetEase
     netease_items = query_netease(title, artist, track_duration)
     for item in netease_items:
         if item["text"] in seen_texts:
@@ -560,7 +624,7 @@ def collect_candidates(title: str, artist: str, album: str, track_duration: int)
         item["match_artist"] = matches_artist(clean_a, item["artist"])
         valid.append(item)
 
-    # 3. syncedlyrics abfragen
+    # 3. Query syncedlyrics
     if HAS_SYNCEDLYRICS:
         sl_texts = query_syncedlyrics_provider(title, artist)
         for sl_text in sl_texts:
@@ -585,9 +649,11 @@ def collect_candidates(title: str, artist: str, album: str, track_duration: int)
     candidates.sort(key=lambda x: (not x["synced"], not x["latin"], x["diff"]))
     return candidates, errors
 
-# --- Menüs & Interaktion ---
-def inspect_and_confirm_lyrics(lyrics: str, source_label: str = "Auswahl") -> str:
+# --- Menus & Interaction ---
+def inspect_and_confirm_lyrics(lyrics: str, source_label: str = "Selection") -> str:
     current = lyrics
+    show_preview = True
+
     while True:
         non_lat = is_non_latin(current)
         synced = has_timestamps(current)
@@ -596,18 +662,24 @@ def inspect_and_confirm_lyrics(lyrics: str, source_label: str = "Auswahl") -> st
         b_script = badge("LATIN", StyleUI.CYAN) if not non_lat else badge("ORIGINAL", StyleUI.MAGENTA)
 
         print(f"\n{StyleUI.BOLD}Status [{source_label}]:{StyleUI.RESET} {b_mode} {b_script}")
-        print(f"  [{StyleUI.GREEN}v{StyleUI.RESET}] Vorschau     [{StyleUI.GREEN}e{StyleUI.RESET}] Editor      [{StyleUI.GREEN}r{StyleUI.RESET}] Romanisieren")
-        print(f"  [{StyleUI.CYAN}y{StyleUI.RESET}] Übernehmen   [{StyleUI.YELLOW}b{StyleUI.RESET}] Zurück      [{StyleUI.RED}q{StyleUI.RESET}] Beenden")
+        if show_preview:
+            preview_text(current)
+        else:
+            show_preview = True
 
-        action = safe_input(f"{StyleUI.BOLD}Aktion: {StyleUI.RESET}").strip().lower()
+        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Editor       [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize      [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
+        print(f"  [{StyleUI.CYAN}y{StyleUI.RESET}] Apply        [{StyleUI.YELLOW}b{StyleUI.RESET}] Back          [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+
+        action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
 
         if action == "q":
             exit_script()
         elif action == "v":
-            preview_text(current)
+            preview_text(current, max_lines=len(current.splitlines()))
+            show_preview = False
         elif action == "e":
             current = open_editor(current)
-            print(f"{StyleUI.GREEN}Änderungen übernommen.{StyleUI.RESET}")
+            print(f"{StyleUI.GREEN}Changes applied.{StyleUI.RESET}")
         elif action == "r":
             current = prompt_romanization(current)
         elif action == "y":
@@ -617,6 +689,7 @@ def inspect_and_confirm_lyrics(lyrics: str, source_label: str = "Auswahl") -> st
 
 def manage_existing_lyrics(file_path: Path, lyrics: str) -> str:
     current_lyrics = lyrics
+    show_preview = True
 
     while True:
         synced = has_timestamps(current_lyrics)
@@ -625,34 +698,39 @@ def manage_existing_lyrics(file_path: Path, lyrics: str) -> str:
         b_mode = badge("SYNC", StyleUI.GREEN) if synced else badge("PLAIN", StyleUI.YELLOW)
         b_script = badge("LATIN", StyleUI.CYAN) if not non_lat else badge("ORIGINAL", StyleUI.MAGENTA)
 
-        print(f"\n{StyleUI.BOLD}Eingebettete Lyrics vorhanden:{StyleUI.RESET} {b_mode} {b_script}")
-        preview_text(current_lyrics)
+        print(f"\n{StyleUI.BOLD}Embedded lyrics found:{StyleUI.RESET} {b_mode} {b_script}")
+        if show_preview:
+            preview_text(current_lyrics)
+        else:
+            show_preview = True
 
-        print(f"{StyleUI.BOLD}Optionen:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Im Editor bearbeiten  [{StyleUI.GREEN}r{StyleUI.RESET}] Romanisieren")
-        print(f"  [{StyleUI.RED}d{StyleUI.RESET}] Aus Datei löschen     [{StyleUI.CYAN}o{StyleUI.RESET}] Online neu suchen")
-        print(f"  [{StyleUI.YELLOW}s{StyleUI.RESET}] Beibehalten & Weiter  [{StyleUI.RED}q{StyleUI.RESET}] Skript beenden")
+        print(f"{StyleUI.BOLD}Options:{StyleUI.RESET}")
+        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Open in editor      [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize        [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
+        print(f"  [{StyleUI.RED}d{StyleUI.RESET}] Delete from file    [{StyleUI.CYAN}o{StyleUI.RESET}] Search online   [{StyleUI.YELLOW}s{StyleUI.RESET}] Keep & Next")
+        print(f"  [{StyleUI.RED}q{StyleUI.RESET}] Quit program")
 
-        action = safe_input(f"{StyleUI.BOLD}Aktion: {StyleUI.RESET}").strip().lower()
+        action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
 
         if action == "q":
             exit_script()
+        elif action == "v":
+            preview_text(current_lyrics, max_lines=len(current_lyrics.splitlines()))
+            show_preview = False
         elif action == "e":
             current_lyrics = open_editor(current_lyrics)
-            if safe_input("Änderungen speichern? [y/N]: ").strip().lower() == "y":
+            if safe_input("Save changes? [y/N]: ").strip().lower() == "y":
                 embed_lyrics(file_path, current_lyrics)
-                print(f"{StyleUI.GREEN}Datei aktualisiert.{StyleUI.RESET}")
+                print(f"{StyleUI.GREEN}File updated.{StyleUI.RESET}")
         elif action == "r":
             current_lyrics = prompt_romanization(current_lyrics)
-            preview_text(current_lyrics, max_lines=8)
-            if safe_input("Romanisierte Lyrics speichern? [y/N]: ").strip().lower() == "y":
+            if safe_input("Save romanized lyrics? [y/N]: ").strip().lower() == "y":
                 embed_lyrics(file_path, current_lyrics)
-                print(f"{StyleUI.GREEN}Datei aktualisiert.{StyleUI.RESET}")
+                print(f"{StyleUI.GREEN}File updated.{StyleUI.RESET}")
         elif action == "d":
-            if safe_input(f"{StyleUI.RED}Lyrics wirklich löschen? [y/N]: {StyleUI.RESET}").strip().lower() == "y":
+            if safe_input(f"{StyleUI.RED}Delete lyrics from file? [y/N]: {StyleUI.RESET}").strip().lower() == "y":
                 delete_lyrics(file_path)
-                print(f"{StyleUI.YELLOW}Lyrics wurden entfernt.{StyleUI.RESET}")
-                sub = safe_input("Direkt online nach neuem Text suchen? [y/N]: ").strip().lower()
+                print(f"{StyleUI.YELLOW}Lyrics removed.{StyleUI.RESET}")
+                sub = safe_input("Search online for new lyrics now? [y/N]: ").strip().lower()
                 return "search_online" if sub == "y" else "done"
         elif action == "o":
             return "search_online"
@@ -664,21 +742,28 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
     current_artist = initial_artist
     current_album = initial_album
 
+    last_query = f"{initial_artist} - {initial_title}" if initial_artist else initial_title
+    valid = []
+    errors = []
+    need_search = True
+
     while True:
-        status_msg = "Suche Lyrics (LRCLIB + NetEase)..."
-        print(f"{StyleUI.GRAY}{status_msg}{StyleUI.RESET}", end="\r")
-        valid, errors = collect_candidates(current_title, current_artist, current_album, duration)
-        print(" " * len(status_msg), end="\r")
+        if need_search:
+            status_msg = "Searching lyrics (LRCLIB + NetEase)..."
+            print(f"{StyleUI.GRAY}{status_msg}{StyleUI.RESET}", end="\r")
+            valid, errors = collect_candidates(current_title, current_artist, current_album, duration)
+            print(" " * len(status_msg), end="\r")
+            need_search = False
 
         if errors:
-            print(f"{StyleUI.RED}{StyleUI.BOLD}⚠️  Hinweis zu LRCLIB:{StyleUI.RESET}")
+            print(f"{StyleUI.RED}{StyleUI.BOLD}⚠️  LRCLIB notice:{StyleUI.RESET}")
             for err in errors:
                 print(f"  {StyleUI.RED}• {err}{StyleUI.RESET}")
 
         if not valid:
-            print(f"{StyleUI.YELLOW}Keine passenden Treffer für diesen Interpreten gefunden.{StyleUI.RESET}")
+            print(f"{StyleUI.YELLOW}No matching results found for this artist.{StyleUI.RESET}")
         else:
-            print(f"{StyleUI.BOLD}Gefundene Treffer ({len(valid)}):{StyleUI.RESET}")
+            print(f"{StyleUI.BOLD}Found lyrics ({len(valid)}):{StyleUI.RESET}")
             for idx, cand in enumerate(valid, 1):
                 b_sync = badge("SYNC", StyleUI.GREEN) if cand["synced"] else badge("PLAIN", StyleUI.YELLOW)
                 b_lang = badge("LATIN", StyleUI.CYAN) if cand["latin"] else badge("ORIG ", StyleUI.MAGENTA)
@@ -686,18 +771,18 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
                 src_col = StyleUI.BLUE if cand["provider"] == "LRCLIB" else StyleUI.MAGENTA
                 b_src = badge(cand["provider"], src_col)
 
-                dur = f"±{cand['diff']}s" if cand["has_dur"] and cand["diff"] else ("Dauer ok" if cand["has_dur"] else "k.A.")
+                dur = f"±{cand['diff']}s" if cand["has_dur"] and cand["diff"] else ("Duration OK" if cand["has_dur"] else "N/A")
 
                 artist_str = f"{cand['artist']} - " if cand.get("artist") else ""
                 full_title = f"{artist_str}{cand['title']}"
                 a_name = cand["album"]
                 print(f"  [{StyleUI.GREEN}{idx}{StyleUI.RESET}] {b_src} {b_sync} {b_lang} {StyleUI.GRAY}{dur:<9}{StyleUI.RESET} {full_title} {StyleUI.GRAY}({a_name}){StyleUI.RESET}")
 
-        print(f"\n{StyleUI.BOLD}Optionen:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}1-{len(valid) if valid else 1}{StyleUI.RESET}] Auswählen    [{StyleUI.CYAN}m{StyleUI.RESET}] Suche anpassen  [{StyleUI.CYAN}n{StyleUI.RESET}] Manuell eingeben (Editor)")
-        print(f"  [{StyleUI.YELLOW}s{StyleUI.RESET}] Überspringen  [{StyleUI.RED}q{StyleUI.RESET}] Beenden")
+        print(f"\n{StyleUI.BOLD}Options:{StyleUI.RESET}")
+        print(f"  [{StyleUI.GREEN}1-{len(valid) if valid else 1}{StyleUI.RESET}] Select       [{StyleUI.CYAN}m{StyleUI.RESET}] Adjust search   [{StyleUI.CYAN}n{StyleUI.RESET}] Enter manually (Editor)")
+        print(f"  [{StyleUI.YELLOW}s{StyleUI.RESET}] Skip         [{StyleUI.RED}q{StyleUI.RESET}] Quit")
 
-        choice = safe_input(f"{StyleUI.BOLD}Auswahl: {StyleUI.RESET}").strip().lower()
+        choice = safe_input(f"{StyleUI.BOLD}Selection: {StyleUI.RESET}").strip().lower()
 
         if choice == "q":
             exit_script()
@@ -705,8 +790,9 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
             return None
 
         elif choice == "m":
-            q = safe_input("Neuer Suchbegriff (Titel oder 'Interpret - Titel'): ").strip()
+            q = safe_input("New search query (title or 'Artist - Title'): ", default_text=last_query).strip()
             if q:
+                last_query = q
                 if " - " in q:
                     parts = q.split(" - ", 1)
                     current_artist = parts[0].strip()
@@ -715,35 +801,102 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
                     current_title = q
                     current_artist = ""
                 current_album = ""
+                need_search = True
             continue
 
         elif choice == "n":
-            print(f"{StyleUI.CYAN}Öffne Editor für manuelle Eingabe...{StyleUI.RESET}")
+            print(f"{StyleUI.CYAN}Opening editor for manual input...{StyleUI.RESET}")
             user_text = open_editor("")
             if not user_text.strip():
-                print(f"{StyleUI.YELLOW}Kein Text eingegeben.{StyleUI.RESET}")
+                print(f"{StyleUI.YELLOW}No text entered.{StyleUI.RESET}")
                 continue
-            final_text = inspect_and_confirm_lyrics(user_text, source_label="Manuell")
+            final_text = inspect_and_confirm_lyrics(user_text, source_label="Manual")
             if final_text:
                 return final_text
             continue
 
         elif choice.isdigit() and 1 <= int(choice) <= len(valid):
             selected = valid[int(choice) - 1]
-            final_text = inspect_and_confirm_lyrics(selected["text"], source_label=f"Eintrag #{choice}")
+            final_text = inspect_and_confirm_lyrics(selected["text"], source_label=f"Entry #{choice}")
             if final_text:
                 return final_text
             continue
 
+# --- File search with depth and quantity safeguards ---
+def complete_path(text, state):
+    expanded = os.path.expanduser(text)
+    matches = glob.glob(expanded + "*")
+    results = [m + ("/" if os.path.isdir(m) else " ") for m in matches]
+    return results[state] if state < len(results) else None
+
+def find_music_files(base_dir: Path):
+    supported = set(ext.lower() for ext in CONFIG["settings"].get("supported_extensions", [".flac", ".mp3", ".ogg", ".opus", ".m4a"]))
+    max_depth = CONFIG["settings"].get("max_search_depth", 3)
+    max_files = CONFIG["settings"].get("max_file_count", 250)
+
+    found_files = []
+    base_parts_len = len(base_dir.resolve().parts)
+
+    for root, dirs, files in os.walk(base_dir, followlinks=False):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+
+        root_path = Path(root)
+        rel_depth = len(root_path.resolve().parts) - base_parts_len
+
+        if rel_depth >= max_depth:
+            dirs[:] = []
+
+        for f in files:
+            if not f.startswith(".") and Path(f).suffix.lower() in supported:
+                found_files.append(root_path / f)
+                if len(found_files) > max_files:
+                    return None, "TOO_MANY_FILES"
+
+    return sorted(found_files), None
+
+def resolve_music_directory(initial_path: Path):
+    current = initial_path
+    max_depth = CONFIG["settings"].get("max_search_depth", 3)
+    max_files = CONFIG["settings"].get("max_file_count", 250)
+
+    while True:
+        resolved = current.resolve()
+
+        if resolved in (Path.home(), Path("/")):
+            print(f"\n{StyleUI.YELLOW}Execution in root or home directory ('{resolved}') detected.{StyleUI.RESET}")
+            print(f"{StyleUI.YELLOW}To prevent unintended large-scale scans, please select a specific music folder.{StyleUI.RESET}")
+        elif resolved.exists() and resolved.is_dir():
+            files, err = find_music_files(resolved)
+
+            if err == "TOO_MANY_FILES":
+                print(f"\n{StyleUI.YELLOW}⚠️  Found more than {max_files} music files in '{resolved}'.{StyleUI.RESET}")
+                print(f"{StyleUI.YELLOW}Search scope is too broad. Please specify an artist or album directory.{StyleUI.RESET}")
+            elif files:
+                return resolved, files
+            else:
+                print(f"\n{StyleUI.YELLOW}No supported music files found in '{resolved}' (max depth: {max_depth} levels).{StyleUI.RESET}")
+        elif not resolved.exists():
+            print(f"\n{StyleUI.RED}Path does not exist: {resolved}{StyleUI.RESET}")
+        else:
+            print(f"\n{StyleUI.RED}Path is not a directory: {resolved}{StyleUI.RESET}")
+
+        readline.set_completer_delims(" \t\n;")
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer(complete_path)
+
+        user_input = safe_input(f"{StyleUI.BOLD}Enter music directory path (or 'q' to quit): {StyleUI.RESET}").strip()
+        readline.set_completer(None)
+
+        clean_input = user_input.strip("'\" ")
+        if not clean_input or clean_input.lower() == "q":
+            exit_script()
+
+        current = Path(clean_input).expanduser()
+
 def process_directory(target_dir: Path):
-    supported = set(ext.lower() for ext in CONFIG["settings"].get("supported_extensions", [".flac", ".mp3"]))
-    files = sorted([p for p in target_dir.rglob("*") if p.suffix.lower() in supported])
+    target_dir, files = resolve_music_directory(target_dir)
 
-    if not files:
-        print(f"{StyleUI.YELLOW}Keine passenden Musikdateien in '{target_dir}' gefunden.{StyleUI.RESET}")
-        return
-
-    print(f"\n{StyleUI.BOLD}{len(files)} Musikdatei(en) gefunden.{StyleUI.RESET}")
+    print(f"\n{StyleUI.BOLD}{len(files)} audio file(s) found in '{target_dir}'.{StyleUI.RESET}")
 
     for idx, file_path in enumerate(files, 1):
         title, artist, album, duration, existing_lyrics = get_track_metadata(file_path)
@@ -751,10 +904,10 @@ def process_directory(target_dir: Path):
         print_banner(f"[{idx}/{len(files)}] {file_path.name}")
 
         if not title or not artist:
-            print(f"{StyleUI.YELLOW}Tags unvollständig: Titel oder Künstler fehlt. Übersprungen.{StyleUI.RESET}")
+            print(f"{StyleUI.YELLOW}Incomplete tags: Title or artist missing. Skipped.{StyleUI.RESET}")
             continue
 
-        dur_str = f"{duration // 60}:{duration % 60:02d} min" if duration else "k.A."
+        dur_str = f"{duration // 60}:{duration % 60:02d} min" if duration else "N/A"
         print(f"{StyleUI.BOLD}Track:{StyleUI.RESET}  {artist} - {title}")
         print(f"{StyleUI.BOLD}Album:{StyleUI.RESET}  {album or 'N/A'} | {dur_str}")
 
@@ -766,22 +919,19 @@ def process_directory(target_dir: Path):
         chosen_lyrics = handle_lyrics_selection(title, artist, album, duration)
         if chosen_lyrics:
             embed_lyrics(file_path, chosen_lyrics)
-            print(f"{StyleUI.GREEN}{StyleUI.BOLD}✓ Lyrics erfolgreich in Datei geschrieben.{StyleUI.RESET}")
+            print(f"{StyleUI.GREEN}{StyleUI.BOLD}✓ Lyrics successfully embedded into file.{StyleUI.RESET}")
         else:
-            print(f"{StyleUI.YELLOW}Übersprungen.{StyleUI.RESET}")
+            print(f"{StyleUI.YELLOW}Skipped.{StyleUI.RESET}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Synchronisierte & reguläre Lyrics in MP3/FLAC verwalten.")
-    parser.add_argument("path", nargs="?", default=".", help="Pfad zum Musikordner (Standard: aktueller Ordner)")
+    parser = argparse.ArgumentParser(description="Manage and embed synchronized & plain lyrics in MP3, FLAC, OGG, OPUS, and M4A.")
+    parser.add_argument("path", nargs="?", default=".", help="Path to music directory (default: current directory)")
     args = parser.parse_args()
 
-    target = Path(args.path).resolve()
-    if not target.exists():
-        print(f"{StyleUI.RED}Pfad existiert nicht: {target}{StyleUI.RESET}")
-        sys.exit(1)
+    target = Path(args.path).expanduser()
 
     try:
         process_directory(target)
     except (KeyboardInterrupt, EOFError):
-        print(f"\n\n{StyleUI.YELLOW}Programm durch Benutzer beendet.{StyleUI.RESET}")
+        print(f"\n\n{StyleUI.YELLOW}Program aborted by user.{StyleUI.RESET}")
         sys.exit(0)
