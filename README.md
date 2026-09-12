@@ -31,6 +31,8 @@ pipx install "fetch-lyrics[all] @ git+https://github.com/<username>/fetch-lyrics
 
 This installs a `fetch-lyrics` command on your `PATH`.
 
+> **fish users:** `pipx` and `pip install --user` place their launchers in `~/.local/bin`. On Fedora that directory is added to `PATH` by `~/.bash_profile`, which fish never reads — so the install succeeds but `fetch-lyrics` is not found. Add it once with `fish_add_path ~/.local/bin` (fish 3.2+); it persists across sessions. In a virtual environment, use `source venv/bin/activate.fish` rather than `activate`, and set the editor with `set -gx EDITOR nvim` rather than `export`.
+
 ### From a checkout
 
 ```bash
