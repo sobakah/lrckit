@@ -130,6 +130,9 @@ def _describe_error(exc: Exception) -> str:
     if isinstance(exc, requests.ConnectionError):
         return "Connection failed"
     if isinstance(exc, requests.HTTPError):
+        response = getattr(exc, "response", None)
+        if response is not None:
+            return f"HTTP {response.status_code} ({response.reason or 'error'})"
         return str(exc) or "HTTP error"
     return type(exc).__name__
 
