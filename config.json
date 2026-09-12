@@ -1,0 +1,34 @@
+{
+  "aliases": [
+    ["tomorrow x together", "txt", "투모로우바이투게더"],
+    ["bts", "bangtan", "방탄소년단"],
+    ["iu", "이지은"],
+    ["snsd", "girls' generation", "소녀시대"],
+    ["g-idle", "(g)i-dle", "(여자)아이들", "gidle"],
+    ["seventeen", "svt", "세븐틴"],
+    ["stray kids", "skz", "스트레이 키즈"],
+    ["le sserafim", "르세라핌"],
+    ["newjeans", "뉴진스"],
+    ["blackpink", "블랙핑크"],
+    ["twice", "트와이스"]
+  ],
+  "cleaning": {
+    "feature_regex": "[\\[\\(][\\s]*(?:feat\\.?|featuring|ft\\.?)\\s+[^\\)\\]]+[\\)\\]]",
+    "trailing_feature_regex": "\\s+(?:feat\\.?|featuring|ft\\.?)\\s+.*$",
+    "ignore_words_artist_match": ["the", "and", "feat", "ft", "with", "&"]
+  },
+  "api": {
+    "lrclib_url": "https://lrclib.net/api",
+    "netease_search_url": "https://music.163.com/api/search/get/web",
+    "netease_lyric_url": "https://music.163.com/api/song/lyric",
+    "timeout_seconds": 6,
+    "netease_search_limit": 6,
+    "user_agent": "LyricsTagger/2.2"
+  },
+  "settings": {
+    "supported_extensions": [".flac", ".mp3"],
+    "default_editor": "nano",
+    "preview_lines": 16,
+    "non_latin_ratio_threshold": 0.25
+  }
+}
