@@ -78,7 +78,7 @@ DEFAULT_CONFIG = {
         "netease_lyric_url": "https://music.163.com/api/song/lyric",
         "timeout_seconds": 6,
         "netease_search_limit": 6,
-        "user_agent": "LyricsTagger/2.5"
+        "user_agent": "LyricsTagger/2.6"
     },
     "settings": {
         "supported_extensions": [".flac", ".mp3", ".ogg", ".opus", ".m4a"],
@@ -419,7 +419,7 @@ def query_lrclib(title: str, artist: str, album: str):
     clean_t = clean_tag(title)
     timeout = CONFIG["api"].get("timeout_seconds", 6)
     api_url = CONFIG["api"].get("lrclib_url", "https://lrclib.net/api")
-    headers = {"User-Agent": CONFIG["api"].get("user_agent", "LyricsTagger/2.5")}
+    headers = {"User-Agent": CONFIG["api"].get("user_agent", "LyricsTagger/2.6")}
 
     queries = []
     if clean_a:
@@ -687,7 +687,7 @@ def inspect_and_confirm_lyrics(lyrics: str, source_label: str = "Selection") -> 
         elif action == "b":
             return ""
 
-def manage_existing_lyrics(file_path: Path, lyrics: str) -> str:
+def manage_existing_lyrics(file_path: Path, lyrics: str):
     current_lyrics = lyrics
     show_preview = True
 
@@ -705,9 +705,9 @@ def manage_existing_lyrics(file_path: Path, lyrics: str) -> str:
             show_preview = True
 
         print(f"{StyleUI.BOLD}Options:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Open in editor      [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize        [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
-        print(f"  [{StyleUI.RED}d{StyleUI.RESET}] Delete from file    [{StyleUI.CYAN}o{StyleUI.RESET}] Search online   [{StyleUI.YELLOW}s{StyleUI.RESET}] Keep & Next")
-        print(f"  [{StyleUI.RED}q{StyleUI.RESET}] Quit program")
+        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Open in editor    [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize      [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
+        print(f"  [{StyleUI.RED}d{StyleUI.RESET}] Delete from file  [{StyleUI.CYAN}o{StyleUI.RESET}] Search online [{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview")
+        print(f"  [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track        [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track    [{StyleUI.RED}q{StyleUI.RESET}] Quit")
 
         action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
 
@@ -731,11 +731,15 @@ def manage_existing_lyrics(file_path: Path, lyrics: str) -> str:
                 delete_lyrics(file_path)
                 print(f"{StyleUI.YELLOW}Lyrics removed.{StyleUI.RESET}")
                 sub = safe_input("Search online for new lyrics now? [y/N]: ").strip().lower()
-                return "search_online" if sub == "y" else "done"
+                return "search_online", None
         elif action == "o":
-            return "search_online"
+            return "search_online", None
         elif action == "s":
-            return "done"
+            return "next", None
+        elif action == "p":
+            return "prev", None
+        elif action == "t":
+            return "tree", None
 
 def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_album: str, duration: int):
     current_title = initial_title
@@ -779,15 +783,19 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
                 print(f"  [{StyleUI.GREEN}{idx}{StyleUI.RESET}] {b_src} {b_sync} {b_lang} {StyleUI.GRAY}{dur:<9}{StyleUI.RESET} {full_title} {StyleUI.GRAY}({a_name}){StyleUI.RESET}")
 
         print(f"\n{StyleUI.BOLD}Options:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}1-{len(valid) if valid else 1}{StyleUI.RESET}] Select       [{StyleUI.CYAN}m{StyleUI.RESET}] Adjust search   [{StyleUI.CYAN}n{StyleUI.RESET}] Enter manually (Editor)")
-        print(f"  [{StyleUI.YELLOW}s{StyleUI.RESET}] Skip         [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+        print(f"  [{StyleUI.GREEN}1-{len(valid) if valid else 1}{StyleUI.RESET}] Select         [{StyleUI.CYAN}m{StyleUI.RESET}] Adjust search   [{StyleUI.CYAN}n{StyleUI.RESET}] Enter manually (Editor)")
+        print(f"  [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track    [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track      [{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview   [{StyleUI.RED}q{StyleUI.RESET}] Quit")
 
         choice = safe_input(f"{StyleUI.BOLD}Selection: {StyleUI.RESET}").strip().lower()
 
         if choice == "q":
             exit_script()
         elif choice == "s":
-            return None
+            return "next", None
+        elif choice == "p":
+            return "prev", None
+        elif choice == "t":
+            return "tree", None
 
         elif choice == "m":
             q = safe_input("New search query (title or 'Artist - Title'): ", default_text=last_query).strip()
@@ -812,14 +820,14 @@ def handle_lyrics_selection(initial_title: str, initial_artist: str, initial_alb
                 continue
             final_text = inspect_and_confirm_lyrics(user_text, source_label="Manual")
             if final_text:
-                return final_text
+                return "apply", final_text
             continue
 
         elif choice.isdigit() and 1 <= int(choice) <= len(valid):
             selected = valid[int(choice) - 1]
             final_text = inspect_and_confirm_lyrics(selected["text"], source_label=f"Entry #{choice}")
             if final_text:
-                return final_text
+                return "apply", final_text
             continue
 
 # --- File search with depth and quantity safeguards ---
@@ -893,35 +901,127 @@ def resolve_music_directory(initial_path: Path):
 
         current = Path(clean_input).expanduser()
 
+# --- Tree-View & Directory Flow ---
+def display_tree_view(files: list, base_dir: Path):
+    """Renders a tree grouped by folder/album showing lyrics statuses and indices."""
+    print_banner(f"Tracks Overview ({len(files)} files)")
+
+    grouped = {}
+    for idx, fp in enumerate(files, 1):
+        rel_parent = fp.parent.relative_to(base_dir)
+        folder_key = str(rel_parent) if str(rel_parent) != "." else base_dir.name
+        if folder_key not in grouped:
+            grouped[folder_key] = []
+        grouped[folder_key].append((idx, fp))
+
+    for folder_name, items in grouped.items():
+        print(f"\n{StyleUI.CYAN}{StyleUI.BOLD}📁 {folder_name}/{StyleUI.RESET}")
+        for idx, fp in items:
+            title, artist, _, _, lyrics = get_track_metadata(fp)
+            track_label = f"{artist} - {title}" if (artist and title) else fp.name
+
+            if lyrics:
+                if has_timestamps(lyrics):
+                    lyr_badge = badge("SYNC", StyleUI.GREEN)
+                else:
+                    lyr_badge = badge("PLAIN", StyleUI.YELLOW)
+            else:
+                lyr_badge = f"{StyleUI.GRAY}[NO LYRICS]{StyleUI.RESET}"
+
+            print(f"  [{StyleUI.GREEN}{idx:2d}{StyleUI.RESET}] {lyr_badge} {track_label}")
+
 def process_directory(target_dir: Path):
     target_dir, files = resolve_music_directory(target_dir)
 
-    print(f"\n{StyleUI.BOLD}{len(files)} audio file(s) found in '{target_dir}'.{StyleUI.RESET}")
+    current_idx = 0
+    show_tree = True
 
-    for idx, file_path in enumerate(files, 1):
+    while True:
+        if show_tree:
+            display_tree_view(files, target_dir)
+            print(f"\n{StyleUI.BOLD}Navigation Options:{StyleUI.RESET}")
+            print(f"  [{StyleUI.GREEN}1-{len(files)}{StyleUI.RESET}] Jump to Song       [{StyleUI.CYAN}Enter{StyleUI.RESET}] Start with first song")
+            print(f"  [{StyleUI.RED}q{StyleUI.RESET}] Quit Program")
+
+            choice = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
+
+            if choice == "q":
+                exit_script()
+            elif choice.isdigit() and 1 <= int(choice) <= len(files):
+                current_idx = int(choice) - 1
+                show_tree = False
+            elif choice == "":
+                current_idx = 0
+                show_tree = False
+            else:
+                continue
+
+        # Bounds check
+        if current_idx < 0:
+            print(f"\n{StyleUI.YELLOW}Already at the first song.{StyleUI.RESET}")
+            current_idx = 0
+        elif current_idx >= len(files):
+            print(f"\n{StyleUI.GREEN}{StyleUI.BOLD}Reached end of track list.{StyleUI.RESET}")
+            show_tree = True
+            continue
+
+        file_path = files[current_idx]
         title, artist, album, duration, existing_lyrics = get_track_metadata(file_path)
 
-        print_banner(f"[{idx}/{len(files)}] {file_path.name}")
+        print_banner(f"[{current_idx + 1}/{len(files)}] {file_path.name}")
 
         if not title or not artist:
-            print(f"{StyleUI.YELLOW}Incomplete tags: Title or artist missing. Skipped.{StyleUI.RESET}")
+            print(f"{StyleUI.YELLOW}Incomplete tags: Title or artist missing.{StyleUI.RESET}")
+            print(f"  [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track    [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track    [{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview    [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+            sub_action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
+            if sub_action == "q":
+                exit_script()
+            elif sub_action == "p":
+                current_idx -= 1
+            elif sub_action == "t":
+                show_tree = True
+            else:
+                current_idx += 1
             continue
 
         dur_str = f"{duration // 60}:{duration % 60:02d} min" if duration else "N/A"
         print(f"{StyleUI.BOLD}Track:{StyleUI.RESET}  {artist} - {title}")
         print(f"{StyleUI.BOLD}Album:{StyleUI.RESET}  {album or 'N/A'} | {dur_str}")
 
-        if existing_lyrics:
-            result = manage_existing_lyrics(file_path, existing_lyrics)
-            if result == "done":
-                continue
+        action = None
+        lyrics_payload = None
 
-        chosen_lyrics = handle_lyrics_selection(title, artist, album, duration)
-        if chosen_lyrics:
-            embed_lyrics(file_path, chosen_lyrics)
+        if existing_lyrics:
+            nav_action, _ = manage_existing_lyrics(file_path, existing_lyrics)
+            if nav_action == "tree":
+                show_tree = True
+                continue
+            elif nav_action == "prev":
+                current_idx -= 1
+                continue
+            elif nav_action == "next":
+                current_idx += 1
+                continue
+            # if "search_online", fall through to search
+
+        action, lyrics_payload = handle_lyrics_selection(title, artist, album, duration)
+
+        if action == "tree":
+            show_tree = True
+            continue
+        elif action == "prev":
+            current_idx -= 1
+            continue
+        elif action == "next":
+            current_idx += 1
+            continue
+        elif action == "apply" and lyrics_payload:
+            embed_lyrics(file_path, lyrics_payload)
             print(f"{StyleUI.GREEN}{StyleUI.BOLD}✓ Lyrics successfully embedded into file.{StyleUI.RESET}")
+            current_idx += 1
         else:
             print(f"{StyleUI.YELLOW}Skipped.{StyleUI.RESET}")
+            current_idx += 1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manage and embed synchronized & plain lyrics in MP3, FLAC, OGG, OPUS, and M4A.")
