@@ -3,7 +3,10 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.2] — 2026-09-13
+## [1.1.0] — 2026-09-13
+
+The project is now called **lrckit**. Everything the old name touched moved with
+it, so this release needs a few manual steps — see *Upgrading* below.
 
 ### Added
 
@@ -19,6 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+* **Renamed from `fetch-lyrics` to `lrckit`.** The command, the Python package,
+  the launcher, the PyPI project name, the User-Agent sent to LRCLIB and the
+  configuration directory all follow the new name.
 * **The selected entry is visible.** The highlighted row is marked with `▶`
   and its number and title are emphasised; the `Enter` line names it in full
   with artist, title, provider and properties, so the selection is readable
@@ -43,6 +49,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and since the queries run concurrently the first response to arrive decided
   the flag. Exactness is now merged across all responses for a record, so the
   same search no longer produces a different marking from run to run.
+
+### Upgrading from 1.0.x
+
+* Reinstall under the new name: `pipx uninstall fetch-lyrics && pipx install
+  git+https://github.com/<username>/lrckit.git`, or `pip install -e ".[all]"`
+  in a fresh checkout.
+* Move your configuration: `mv ~/.config/fetch-lyrics ~/.config/lrckit`.
+* The command is now `lrckit`; in a checkout the launcher is `./lrckit.py`.
+* Nothing changes in your audio files. Tags written by earlier versions are
+  read and written identically.
 
 ## [1.0.1] — 2026-09-13
 
@@ -122,6 +138,6 @@ See the README for the full feature set. Highlights: concurrent queries against
 LRCLIB, NetEase and `syncedlyrics`; confidence-aware ranking; batch mode with
 `--auto` and `--dry-run`; recursive configuration merging; and a pytest suite.
 
-[1.0.2]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.2
-[1.0.1]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.1
-[1.0.0]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.0
+[1.1.0]: https://github.com/<username>/lrckit/releases/tag/v1.1.0
+[1.0.1]: https://github.com/<username>/lrckit/releases/tag/v1.0.1
+[1.0.0]: https://github.com/<username>/lrckit/releases/tag/v1.0.0

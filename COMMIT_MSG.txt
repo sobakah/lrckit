@@ -1,0 +1,56 @@
+release: rename to lrckit and ship 1.1.0
+
+The project name fetch-lyrics described only the least interesting part
+of what this does. Searching is the easy half; romanizing mixed writing
+systems and writing native lyrics tags across five container formats is
+the half worth naming. lrckit says what it is without promising only a
+download.
+
+Everything the old name touched moves with it: the console command, the
+Python package directory, the launcher, the PyPI project name, the
+User-Agent sent to LRCLIB and the configuration directory. The launcher
+and the package deliberately share a name; Python resolves the import to
+the package directory, which is verified from inside a checkout, from
+outside one and via python -m.
+
+Audio files are unaffected. Tags written by earlier versions are read and
+written identically, so no re-tagging is needed. Users must reinstall
+under the new name and move ~/.config/fetch-lyrics to ~/.config/lrckit.
+
+Also released in 1.1.0, previously unversioned:
+
+Searches are cached for the session. Results were kept only while the
+search menu stayed open, so stepping to the next track and back
+re-queried all three providers for a track already looked at. Entries are
+keyed by the query actually sent and carry the highlighted entry, so the
+selection survives the round trip. [R] forces a fresh search and a
+successful save drops the entry.
+
+The candidate list shows which entry is in focus. An exact match from
+LRCLIB's /get endpoint is highlighted on arrival and Enter saves it
+directly; returning from an inspected entry keeps that entry highlighted.
+All menus are rendered by one layout function that groups options under
+headings and arranges them in columns sized to the terminal.
+
+Fixes the exact flag: /get and /search frequently return the same record,
+and because the queries run concurrently the first response to arrive
+decided whether it was marked exact. Exactness is now merged across all
+responses for a record.
+
+Changed:
+  - renamed fetch-lyrics -> lrckit (command, package, config dir, UA)
+  - grouped, column-aligned menus that adapt to the terminal width
+  - marker and emphasis on the highlighted candidate
+  - batch output names the applied entry
+
+Added:
+  - session-wide search cache with a configurable cap
+  - Enter confirms the highlighted candidate
+
+Fixed:
+  - exact flag assigned at random when a record came from both endpoints
+
+BREAKING CHANGE: the command is now lrckit and the configuration lives in
+~/.config/lrckit. See CHANGELOG.md for upgrade steps.
+
+Tests: 64 passing, 1 skipped.
