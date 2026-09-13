@@ -25,9 +25,9 @@ Version 1.1.0 · Python 3.10+ · MIT
 ### pipx (recommended)
 
 ```bash
-pipx install git+https://github.com/<username>/lrckit.git
+pipx install git+https://github.com/sobakah/lrckit.git
 # with romanization and the extra provider engine:
-pipx install "lrckit[all] @ git+https://github.com/<username>/lrckit.git"
+pipx install "lrckit[all] @ git+https://github.com/sobakah/lrckit.git"
 ```
 
 This installs a `lrckit` command on your `PATH`.
@@ -37,7 +37,7 @@ This installs a `lrckit` command on your `PATH`.
 ### From a checkout
 
 ```bash
-git clone https://github.com/<username>/lrckit.git
+git clone https://github.com/sobakah/lrckit.git
 cd lrckit
 pip install -e ".[all]"
 ```
