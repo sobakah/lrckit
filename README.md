@@ -126,9 +126,9 @@ lrckit ~/Music/Artist --auto --dry-run
 | `t` | Back to the tree overview |
 | `q` | Quit |
 
-An entry is marked `✓exact` when it came back from LRCLIB's `/get` endpoint, which is queried with title, artist, album and — when the file has one — duration, and returns the canonical record rather than a ranked guess. Note that a second `/get` runs without the duration, so `✓exact` on its own does not prove the length was checked; the duration column shows that separately.
+`✓exact` marks a record LRCLIB returned as a direct match rather than a search hit; the duration column shows separately whether the length was verified.
 
-The highlighted entry is marked with `▶` and named in full on the `Enter` line. A search highlights its top result when that result is an exact match; inspecting an entry and returning with `b` highlights that one instead, so it is always visible where you left off.
+The entry `Enter` would save is marked `▶` and named in full above the menu — the exact match after a search, or the one you last inspected.
 
 **Inspection** (candidate or manual entry)
 
