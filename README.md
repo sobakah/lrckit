@@ -153,20 +153,18 @@ Unsaved edits are marked `(modified, unsaved)` in the header; navigating away as
 
 ## Romanization of mixed-script lyrics
 
-Chinese and Japanese share Han characters, so handing a whole line to one backend goes wrong in both directions: pykakasi reads Hanzi as Kanji, and a second pass mangles the first pass's output because tone marks are not ASCII.
+Each line is split into runs of one script, and only non-Latin runs are converted — text that is already Latin is never touched, so passes can be combined without destroying each other's output.
 
-Each line is therefore split into runs of one script, and only non-Latin runs are converted. A Han run is classified in this order:
+Hangul and Kana are unambiguous. A Han run is read as Japanese when Kana touches it or when it contains a character unique to Japanese, and as Chinese when pykakasi has no reading for part of it. Anything still ambiguous follows the choice you make when starting the conversion.
 
-1. **Character proof.** A shinjitai form means Japanese. For Chinese, the run is fed to pykakasi and the share of characters it has a reading for is measured — its dictionary contains no simplified forms, so incomplete coverage proves the run is not Japanese. This probes the whole dictionary rather than a curated list.
-2. **Kana contact.** Kana directly touching the run means Japanese.
-3. **Kana on the line,** but only when nothing else on that line points elsewhere — no Hangul, no run already proven Chinese. This catches spaced Japanese without capturing Chinese on a language-switching line.
-4. **Your choice**, for everything still ambiguous.
+Pick **Mixed scripts** in the `r` menu; it is preselected when two different Asian scripts share the text. A line like `사랑해 我爱你 ありがとう` becomes `saranghae wǒ ài nǐ arigatou` in one pass.
 
-Pick **Mixed scripts** in the `r` menu. It is preselected only when two different Asian scripts actually share the text — a single Asian script next to Latin does not need it, since Latin passages are left alone anyway. A line like `사랑해 我爱你 ありがとう` becomes `saranghae wǒ ài nǐ arigatou` in one pass.
+### Limitations
 
-**Provider credits.** NetEase prepends headers such as `作词 : …` and `编曲 : …` to its LRC files. Those are Chinese metadata, not lyrics, and they are ignored when deciding which scripts a song contains — otherwise every Korean or Japanese song from that provider would look mixed. They are still passed through the conversion, so a Korean name in a credit line gets romanized along with the rest.
-
-**What stays ambiguous.** Text written purely in characters both systems share cannot be told apart without understanding the language — `月光下的思念` and `東京物語` are valid in either reading. Those runs follow the choice you make when starting the conversion. In a measured sample of typical lyric lines, roughly four in five resolved on their own; the rest fell back to that choice. Traditional Chinese resolves less often than simplified, because traditional forms are largely the same characters Japanese uses.
+* **Runs of purely shared characters cannot be resolved automatically.** `月光下的思念` and `東京物語` are valid in either reading and fall back to your choice. Roughly four in five runs resolve on their own in typical lyrics; traditional Chinese resolves less often than simplified.
+* **Japanese word spacing is approximate.** Verb and adjective endings stay attached (`愛してる` → `itoshiteru`), but a particle following a Kana-ending compound may be attached too: `ずっと一緒にいたい` → `zutto isshoniitai`.
+* **Kanji readings come from pykakasi** and are not context-aware for names or unusual readings — `君` becomes `kun`, not `kimi`.
+* **Provider credit headers** such as NetEase's `作词 : …` are ignored when detecting scripts, but are still passed through the conversion.
 
 ---
 
