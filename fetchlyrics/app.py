@@ -89,40 +89,57 @@ def sort_files(files: list[Path], cache: MetadataCache) -> list[Path]:
     return sorted(files, key=natural_key)
 
 
-def resolve_music_directory(initial_path: Path) -> tuple[Path, list[Path]]:
+def resolve_music_directory(
+    initial_path: Path | None,
+    allow_cancel: bool = False,
+) -> tuple[Path, list[Path]] | None:
+    """Find a usable music directory, prompting until one is given.
+
+    With *initial_path* set to None the prompt comes first, which is how the
+    tree view switches to another folder. With *allow_cancel* an empty answer
+    returns None instead of ending the program.
+    """
     current = initial_path
     max_depth = int(config.get("settings", "max_search_depth", 3))
     max_files = int(config.get("settings", "max_file_count", 250))
 
     while True:
-        resolved = current.expanduser().resolve()
+        if current is not None:
+            resolved = current.expanduser().resolve()
 
-        if resolved == Path.home() or resolved == Path(resolved.anchor):
-            warn(f"\nExecution in root or home directory ('{resolved}') detected.")
-            warn("To prevent unintended large-scale scans, please select a specific music folder.")
-        elif resolved.is_dir():
-            files, err = find_music_files(resolved)
-            if err == "TOO_MANY_FILES":
-                warn(f"\n⚠️  Found more than {max_files} music files in '{resolved}'.")
-                warn("Search scope is too broad. Please specify an artist or album directory.")
-            elif files:
-                return resolved, files
+            if resolved == Path.home() or resolved == Path(resolved.anchor):
+                warn(f"\nExecution in root or home directory ('{resolved}') detected.")
+                warn("To prevent unintended large-scale scans, please select a specific music folder.")
+            elif resolved.is_dir():
+                files, err = find_music_files(resolved)
+                if err == "TOO_MANY_FILES":
+                    warn(f"\n⚠️  Found more than {max_files} music files in '{resolved}'.")
+                    warn("Search scope is too broad. Please specify an artist or album directory.")
+                elif files:
+                    return resolved, files
+                else:
+                    warn(
+                        f"\nNo supported music files found in '{resolved}' "
+                        f"(max depth: {max_depth} directory levels)."
+                    )
+            elif not resolved.exists():
+                error(f"\nPath does not exist: {resolved}")
             else:
-                warn(
-                    f"\nNo supported music files found in '{resolved}' "
-                    f"(max depth: {max_depth} directory levels)."
-                )
-        elif not resolved.exists():
-            error(f"\nPath does not exist: {resolved}")
-        else:
-            error(f"\nPath is not a directory: {resolved}")
+                error(f"\nPath is not a directory: {resolved}")
 
+        hint = "empty to cancel" if allow_cancel else "or 'q' to quit"
         enable_path_completion()
-        raw = safe_input(f"{StyleUI.BOLD}Enter music directory path (or 'q' to quit): {StyleUI.RESET}")
+        raw = safe_input(f"{StyleUI.BOLD}Enter music directory path ({hint}): {StyleUI.RESET}")
         disable_path_completion()
 
         cleaned = raw.strip().strip("'\" ")
-        if not cleaned or cleaned.lower() == "q":
+        if not cleaned:
+            if allow_cancel:
+                return None
+            exit_script()
+        if cleaned.lower() == "q":
+            if allow_cancel:
+                return None
             exit_script()
         current = Path(cleaned)
 
@@ -166,20 +183,38 @@ def print_candidates(candidates: list[Candidate]) -> None:
 
 
 # --- romanization prompt -----------------------------------------------------
+def prompt_han_default() -> str | None:
+    """Ask how Han runs should be read when nothing else disambiguates them."""
+    print(f"\n{StyleUI.BOLD}Chinese and Japanese share Han characters.{StyleUI.RESET}")
+    print(f"{StyleUI.GRAY}Runs next to Kana, or containing characters unique to one system,{StyleUI.RESET}")
+    print(f"{StyleUI.GRAY}are detected automatically. Choose how to read the rest:{StyleUI.RESET}")
+    print(f"  [{StyleUI.GREEN}1{StyleUI.RESET}] Chinese → Pīnyīn   [{StyleUI.GREEN}2{StyleUI.RESET}] Japanese → Rōmaji   [{StyleUI.YELLOW}c{StyleUI.RESET}] Cancel")
+
+    answer = safe_input(f"{StyleUI.BOLD}Choice (Enter = 1): {StyleUI.RESET}").strip().lower()
+    if answer in ("", "1"):
+        return "zh"
+    if answer == "2":
+        return "ja"
+    return None
+
+
 def prompt_romanization(lyrics: str) -> str:
     suggestion = text.detect_script(lyrics)
     keys = list(text.ROMANIZERS)
 
-    print(f"\n{StyleUI.BOLD}Select romanization language:{StyleUI.RESET}")
+    print(f"\n{StyleUI.BOLD}Select romanization:{StyleUI.RESET}")
     for index, key in enumerate(keys, 1):
         label, available, package = text.ROMANIZERS[key]
-        state = "Available" if available() else f"Missing: pip install {package}"
+        if key == "mixed":
+            state = "Uses the backends below"
+        else:
+            state = "Available" if available() else f"Missing: pip install {package}"
         hint = f" {StyleUI.GREEN}(detected){StyleUI.RESET}" if key == suggestion else ""
         print(f"  [{StyleUI.GREEN}{index}{StyleUI.RESET}] {label} [{state}]{hint}")
     print(f"  [{StyleUI.YELLOW}c{StyleUI.RESET}] Cancel")
 
     default_index = keys.index(suggestion) + 1 if suggestion in keys else None
-    prompt = f"{StyleUI.BOLD}Choose language [1-{len(keys)}/c]"
+    prompt = f"{StyleUI.BOLD}Choose [1-{len(keys)}/c]"
     prompt += f" (Enter = {default_index}): " if default_index else ": "
 
     choice = safe_input(prompt).strip().lower()
@@ -190,12 +225,25 @@ def prompt_romanization(lyrics: str) -> str:
 
     key = keys[int(choice) - 1]
     label, available, package = text.ROMANIZERS[key]
-    if not available():
+
+    han_default = "zh"
+    if key == "mixed":
+        missing = [
+            pkg for k, (_, avail, pkg) in text.ROMANIZERS.items()
+            if k != "mixed" and not avail()
+        ]
+        if missing:
+            warn(f"Not installed, those scripts fall back to anyascii or stay unchanged: {', '.join(missing)}")
+        chosen = prompt_han_default()
+        if chosen is None:
+            return lyrics
+        han_default = chosen
+    elif not available():
         error(f"Package '{package}' is not installed.")
         return lyrics
 
     info("Converting lyric lines...")
-    return text.romanize_lyrics(lyrics, key)
+    return text.romanize_lyrics(lyrics, key, han_default=han_default)
 
 
 # --- menus -------------------------------------------------------------------
@@ -504,13 +552,24 @@ def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> 
     while True:
         if show_tree:
             display_tree(files, base_dir, cache)
-            print(f"\n{StyleUI.BOLD}Navigation Options:{StyleUI.RESET}")
+            print(f"\n{StyleUI.BOLD}Current folder:{StyleUI.RESET} {StyleUI.GRAY}{base_dir}{StyleUI.RESET}")
+            print(f"{StyleUI.BOLD}Navigation Options:{StyleUI.RESET}")
             print(f"  [{StyleUI.GREEN}1-{len(files)}{StyleUI.RESET}] Jump to Song       [{StyleUI.CYAN}Enter{StyleUI.RESET}] Start with first song")
-            print(f"  [{StyleUI.RED}q{StyleUI.RESET}] Quit Program")
+            print(f"  [{StyleUI.CYAN}c{StyleUI.RESET}] Change directory     [{StyleUI.RED}q{StyleUI.RESET}] Quit Program")
 
             choice = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
             if choice == "q":
                 exit_script()
+            elif choice == "c":
+                changed = resolve_music_directory(None, allow_cancel=True)
+                if changed is None:
+                    info("Keeping the current folder.")
+                    continue
+                base_dir, discovered = changed
+                files = sort_files(discovered, cache)
+                current_index = 0
+                success(f"Switched to {base_dir} ({len(files)} files).")
+                continue
             elif choice == "":
                 current_index = 0
                 show_tree = False

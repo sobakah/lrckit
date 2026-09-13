@@ -84,6 +84,186 @@ def test_romanization_preserves_timestamps():
     assert out.splitlines()[1] == "[00:12.50]hello"
 
 
+# --- mixed-script romanization -----------------------------------------------
+def test_segmentation_splits_by_script():
+    runs = text.segment_line("사랑 我爱 ありがとう ok")
+    kinds = [kind for kind, _ in runs]
+    assert text.HANGUL in kinds and text.HAN in kinds and text.KANA in kinds
+    assert "".join(frag for _, frag in runs) == "사랑 我爱 ありがとう ok"
+
+
+def test_latin_text_is_never_touched():
+    # The core bug: a second pass used to shred the first pass's output.
+    assert text.romanize_lyrics("wǒ ài nǐ", "ja") == "wǒ ài nǐ"
+    assert text.romanize_lyrics("wǒ ài nǐ", "ko") == "wǒ ài nǐ"
+    assert text.romanize_lyrics("hello world", "mixed") == "hello world"
+
+
+@pytest.mark.skipif(not (text.HAS_KAKASI and text.HAS_PYPINYIN and text.HAS_KOREAN),
+                    reason="all three romanization backends required")
+def test_three_scripts_in_one_line():
+    out = text.romanize_lyrics("[00:12.30]사랑해 我爱你 ありがとう", "mixed")
+    assert out.startswith("[00:12.30]")
+    assert "saranghae" in out          # Hangul via korean-romanizer
+    assert "wǒ" in out                 # Hanzi via pypinyin, tone marks intact
+    assert "arigatou" in out           # Kana via pykakasi
+    assert "ware" not in out           # was misread as Kanji before
+
+
+@pytest.mark.skipif(not (text.HAS_KAKASI and text.HAS_PYPINYIN),
+                    reason="pykakasi and pypinyin required")
+def test_sequential_passes_are_lossless():
+    after_zh = text.romanize_lyrics("我爱你 ありがとう", "zh")
+    assert "wǒ ài nǐ" in after_zh
+    after_ja = text.romanize_lyrics(after_zh, "ja")
+    assert "wǒ ài nǐ" in after_ja      # pinyin survived the Japanese pass
+    assert "arigatou" in after_ja
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_kana_adjacency_marks_han_as_japanese():
+    assert text.romanize_lyrics("東京の夜", "mixed") == "toukyou no yoru"
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_kanji_keeps_its_kana_context():
+    # A lone 見 is read "ken"; together with its Kana tail it is "mitsu".
+    # Splitting script runs apart used to destroy that context.
+    out = text.romanize_lyrics("見つけたよ ココロが安らぐ", "mixed")
+    assert "ken" not in out
+    assert "mitsuketayo" in out
+    assert "yasuragu" in out
+    assert "kokoro ga" in out
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_okurigana_is_not_split_by_spaces():
+    assert text.romanize_lyrics("愛してる", "ja") == "itoshiteru"
+    assert text.romanize_lyrics("心が震える", "ja") == "kokoro ga furueru"
+    assert text.romanize_lyrics("空を見上げて", "ja") == "sora wo miagete"
+    # Genuine word boundaries keep their space.
+    assert text.romanize_lyrics("東京の夜", "ja") == "toukyou no yoru"
+
+
+@pytest.mark.skipif(not (text.HAS_KAKASI and text.HAS_PYPINYIN and text.HAS_KOREAN),
+                    reason="all three romanization backends required")
+def test_adjacent_runs_of_different_languages_stay_separate():
+    out = text.romanize_lyrics("사랑해 我爱你 ありがとう", "mixed", han_default="zh")
+    assert out == "saranghae wǒ ài nǐ arigatou"
+
+
+def test_character_sets_are_disjoint():
+    assert not (text._ZH_ONLY & text._JP_ONLY)
+
+
+def test_han_evidence_from_unique_characters():
+    assert text._han_evidence("気持") == "ja"      # shinjitai-only
+    assert text._han_evidence("山川") is None      # shared, stays ambiguous
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_kakasi_coverage_detects_simplified_chinese():
+    # pykakasi's dictionary holds no simplified forms, so incomplete coverage
+    # is proof the run is not Japanese.
+    assert text._kakasi_han_coverage("东车书长门") < 1.0
+    assert text._kakasi_han_coverage("東京物語") == 1.0
+    assert text._han_evidence("我爱你") == "zh"
+    assert text._han_evidence("这个时候") == "zh"
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_romanizer_never_deletes_text():
+    # pykakasi drops characters it cannot read; the result must not vanish.
+    assert text.romanize_lyrics("东车书长门", "ja") == "东车书长门"
+    assert text.romanize_segment("东车书长门", "ja") == "东车书长门"
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_spaced_kana_still_marks_han_as_japanese():
+    runs = text.segment_line("東京 の 夜")
+    kind = next(text._resolve_han(runs, i, "zh") for i, (k, _) in enumerate(runs) if k == text.HAN)
+    assert kind == "ja"
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_spaced_kana_does_not_capture_chinese_on_a_mixed_line():
+    # The user-facing case: Korean, Chinese and Japanese separated by spaces.
+    runs = text.segment_line("사랑해 我爱你 ありがとう")
+    kind = next(text._resolve_han(runs, i, "ja") for i, (k, _) in enumerate(runs) if k == text.HAN)
+    assert kind == "zh"
+
+
+@pytest.mark.skipif(not (text.HAS_KAKASI and text.HAS_PYPINYIN),
+                    reason="pykakasi and pypinyin required")
+def test_han_default_decides_ambiguous_runs():
+    ja = text.romanize_lyrics("東京物語", "mixed", han_default="ja")
+    zh = text.romanize_lyrics("東京物語", "mixed", han_default="zh")
+    assert ja != zh
+    assert "toukyou" in ja
+
+
+def test_detect_script_reports_mixed():
+    assert text.detect_script("사랑해 我爱你 ありがとう") == "mixed"
+    assert text.detect_script("사랑해 ありがとう") == "mixed"
+    assert text.detect_script("我的世界") == "zh"
+    assert text.detect_script("ありがとう") == "ja"
+    assert text.detect_script("사랑해") == "ko"
+    assert text.detect_script("plain english") is None
+    assert text.detect_script("[00:10.00]") is None
+
+
+def test_netease_credit_headers_are_not_lyrics():
+    # NetEase prepends "作词/作曲/编曲" credits; they are Chinese metadata and
+    # used to make every Korean song from that provider look mixed.
+    assert text.is_credit_line("[00:00.000] 作词 : 김동현, MARK")
+    assert text.is_credit_line("作曲：Timothy Bullock")
+    assert text.is_credit_line("OP : Some Publisher")
+    # A lyric line that merely contains a colon must not be swallowed.
+    assert not text.is_credit_line("[01:00.00]我说:别走")
+    assert not text.is_credit_line("[01:00.00]차가운 세상")
+
+
+def test_credit_headers_do_not_trigger_mixed_mode():
+    lrc = (
+        "[00:00.000] 作词 : 김동현\n"
+        "[00:01.000] 作曲 : Timothy Bullock\n"
+        "[00:02.000] 编曲 : Bos Billions\n"
+        "[00:17.810]차가운 세상 눈을 감고\n"
+        "[00:26.880]We'll take it slow"
+    )
+    assert text.detect_script(lrc) == "ko"
+
+
+def test_typographic_punctuation_is_not_a_script():
+    # …, em dashes and curly quotes are not ASCII but need no transliteration.
+    for mark in ("…", "—", "\u2018", "\u2019", "\u201c", "\u00bb"):
+        assert text._char_class(mark) == text.KEEP
+
+
+def test_one_asian_script_beside_latin_is_not_mixed():
+    # The mixed option must not be preselected when a single backend suffices.
+    assert text.detect_script("사랑해… 언제나") == "ko"
+    assert text.detect_script("너의 이름 — forever") == "ko"
+    assert text.detect_script("\u2018사랑\u2019 이라는 말") == "ko"
+    assert text.detect_script("이 밤 hello world") == "ko"
+    assert text.detect_script("ありがとう…ずっと") == "ja"
+
+
+@pytest.mark.skipif(not text.HAS_KAKASI, reason="pykakasi required")
+def test_chinese_beside_japanese_is_still_mixed():
+    # Kana on the line must not absorb a proven Chinese run.
+    assert text.detect_script("我爱你 ありがとう") == "mixed"
+
+
+def test_latin_only_text_needs_no_romanization():
+    assert text.detect_script("Caf\u00e9 na\u00efve r\u00e9sum\u00e9") is None
+
+
+def test_no_collision_between_converted_and_kept_text():
+    out = text.romanize_lyrics("사랑world", "mixed")
+    assert " " in out and "world" in out
+
+
 # --- editor ------------------------------------------------------------------
 def test_editor_command_splits_arguments(monkeypatch):
     monkeypatch.setenv("EDITOR", "code --wait")
