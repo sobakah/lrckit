@@ -16,6 +16,8 @@ from .ui import (
     StyleUI,
     badge,
     confirm,
+    print_menu,
+    print_primary_action,
     disable_path_completion,
     enable_path_completion,
     error,
@@ -160,7 +162,7 @@ def print_provider_errors(report: SearchReport) -> None:
             print(f"  {StyleUI.RED}• {provider}: {message}{StyleUI.RESET}")
 
 
-def print_candidates(candidates: list[Candidate]) -> None:
+def print_candidates(candidates: list[Candidate], highlight: int | None = None) -> None:
     print(f"{StyleUI.BOLD}Found lyrics ({len(candidates)}):{StyleUI.RESET}")
     colors = {"LRCLIB": StyleUI.BLUE, "NetEase": StyleUI.MAGENTA, "MULTI": StyleUI.CYAN}
     for index, cand in enumerate(candidates, 1):
@@ -174,12 +176,30 @@ def print_candidates(candidates: list[Candidate]) -> None:
             duration = "N/A"
         exact = f" {StyleUI.GREEN}✓exact{StyleUI.RESET}" if cand.exact else ""
 
+        selected = index == highlight
+        marker = f"{StyleUI.GREEN}{StyleUI.BOLD}▶{StyleUI.RESET}" if selected else " "
+        number = (
+            f"{StyleUI.GREEN}{StyleUI.BOLD}{index}{StyleUI.RESET}"
+            if selected else f"{StyleUI.GREEN}{index}{StyleUI.RESET}"
+        )
         artist = f"{cand.artist} - " if cand.artist else ""
+        title = f"{StyleUI.BOLD}{artist}{cand.title}{StyleUI.RESET}" if selected else f"{artist}{cand.title}"
+
         print(
-            f"  [{StyleUI.GREEN}{index}{StyleUI.RESET}] {source} {sync} {script} "
-            f"{StyleUI.GRAY}{duration:<12}{StyleUI.RESET} {artist}{cand.title} "
+            f"{marker} [{number}] {source} {sync} {script} "
+            f"{StyleUI.GRAY}{duration:<12}{StyleUI.RESET} {title} "
             f"{StyleUI.GRAY}({cand.album}){StyleUI.RESET}{exact}"
         )
+
+
+def describe_candidate(index: int, cand: Candidate) -> str:
+    artist = f"{cand.artist} - " if cand.artist else ""
+    tags = ["synced" if cand.synced else "plain"]
+    if cand.exact:
+        tags.append("exact")
+    if cand.has_duration:
+        tags.append("duration OK" if not cand.diff else f"±{cand.diff}s")
+    return f"#{index} {artist}{cand.title} [{cand.provider}, {', '.join(tags)}]"
 
 
 # --- romanization prompt -----------------------------------------------------
@@ -258,8 +278,18 @@ def inspect_and_confirm(lyrics: str, source_label: str = "Selection") -> str | N
             preview_text(current)
         show_preview = True
 
-        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Editor       [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize      [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
-        print(f"  [{StyleUI.CYAN}y{StyleUI.RESET}] Apply        [{StyleUI.YELLOW}b{StyleUI.RESET}] Back          [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+        print_primary_action("y", "Apply these lyrics")
+        print_menu([
+            ("Edit", [
+                ("e", "Open in editor"),
+                ("r", "Romanize"),
+                ("v", "Full preview"),
+            ]),
+            ("Navigate", [
+                ("b", "Back to candidates"),
+                ("q", "Quit"),
+            ]),
+        ])
 
         action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
 
@@ -312,11 +342,25 @@ def manage_existing_lyrics(meta: TrackMeta, cache: MetadataCache) -> str:
             preview_text(current)
         show_preview = True
 
-        print(f"{StyleUI.BOLD}Options:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}e{StyleUI.RESET}] Open in editor    [{StyleUI.GREEN}r{StyleUI.RESET}] Romanize      [{StyleUI.GREEN}v{StyleUI.RESET}] Full Preview")
-        print(f"  [{StyleUI.GREEN}w{StyleUI.RESET}] Save changes      [{StyleUI.YELLOW}z{StyleUI.RESET}] Revert        [{StyleUI.RED}d{StyleUI.RESET}] Delete from file")
-        print(f"  [{StyleUI.CYAN}o{StyleUI.RESET}] Search online     [{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track")
-        print(f"  [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track        [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+        print_menu([
+            ("Edit", [
+                ("e", "Open in editor"),
+                ("r", "Romanize"),
+                ("v", "Full preview"),
+            ]),
+            ("File", [
+                ("w", "Save changes"),
+                ("z", "Revert changes"),
+                ("d", "Delete lyrics tag"),
+                ("o", "Search online instead"),
+            ]),
+            ("Navigate", [
+                ("p", "Previous track"),
+                ("s", "Next track"),
+                ("t", "Tree overview"),
+                ("q", "Quit"),
+            ]),
+        ])
 
         action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
 
@@ -385,39 +429,79 @@ def manage_existing_lyrics(meta: TrackMeta, cache: MetadataCache) -> str:
             warn("Unknown option.")
 
 
-def select_lyrics(meta: TrackMeta) -> tuple[str, str | None]:
+def select_lyrics(meta: TrackMeta, cache: providers.SearchCache) -> tuple[str, str | None]:
     """Search menu. Returns (action, lyrics)."""
     current_title, current_artist, current_album = meta.title, meta.artist, meta.album
     last_query = f"{meta.artist} - {meta.title}" if meta.artist else meta.title
 
-    report: SearchReport | None = None
+    entry: providers.CachedSearch | None = None
     need_search = True
+    force_refresh = False
 
     while True:
         if need_search:
-            with transient("Searching lyrics (LRCLIB + NetEase + syncedlyrics)..."):
-                report = providers.collect_candidates(
-                    current_title, current_artist, current_album, meta.duration
-                )
-            need_search = False
-            print_provider_errors(report)
+            key = providers.SearchCache.key(
+                current_title, current_artist, current_album, meta.duration
+            )
+            if force_refresh:
+                cache.discard(key)
+            entry = None if force_refresh else cache.get(key)
 
+            if entry is None:
+                with transient("Searching lyrics (LRCLIB + NetEase + syncedlyrics)..."):
+                    report = providers.collect_candidates(
+                        current_title, current_artist, current_album, meta.duration
+                    )
+                highlight = 1 if (report.candidates and report.candidates[0].exact) else None
+                entry = cache.set(key, providers.CachedSearch(report, highlight))
+            else:
+                info("Using cached search results.")
+
+            need_search = False
+            force_refresh = False
+            print_provider_errors(entry.report)
+
+        report = entry.report if entry else None
         candidates = report.candidates if report else []
         if not candidates:
             warn("No matching results found.")
+            if entry:
+                entry.highlight = None
         else:
-            print_candidates(candidates)
+            print_candidates(candidates, highlight=entry.highlight if entry else None)
+
+        # Enter confirms the highlighted entry: the exact match a search found,
+        # or the one inspected last before returning to this list.
+        highlight = entry.highlight if entry else None
+        confirmable = candidates[highlight - 1] if highlight and highlight <= len(candidates) else None
 
         upper = len(candidates) if candidates else 1
-        print(f"\n{StyleUI.BOLD}Options:{StyleUI.RESET}")
-        print(f"  [{StyleUI.GREEN}1-{upper}{StyleUI.RESET}] Select         [{StyleUI.CYAN}m{StyleUI.RESET}] Adjust search   [{StyleUI.CYAN}n{StyleUI.RESET}] Enter manually (Editor)")
-        print(f"  [{StyleUI.CYAN}R{StyleUI.RESET}] Repeat search  [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track      [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track")
-        print(f"  [{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview  [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+        if confirmable is not None:
+            print_primary_action("Enter", f"Save {describe_candidate(highlight, confirmable)}")
+        print_menu([
+            ("Lyrics", [
+                (f"1-{upper}", "Inspect and select"),
+                ("m", "Adjust search query"),
+                ("n", "Enter manually (editor)"),
+                ("R", "Repeat search"),
+            ]),
+            ("Navigate", [
+                ("p", "Previous track"),
+                ("s", "Next track"),
+                ("t", "Tree overview"),
+                ("q", "Quit"),
+            ]),
+        ])
 
         choice = safe_input(f"{StyleUI.BOLD}Selection: {StyleUI.RESET}").strip()
         lowered = choice.lower()
 
-        if lowered == "q":
+        if choice == "" and confirmable is not None:
+            success(f"Selected {describe_candidate(highlight, confirmable)}")
+            return "apply", confirmable.text
+        elif choice == "":
+            warn("No entry highlighted - pick a number first.")
+        elif lowered == "q":
             exit_script()
         elif lowered == "s":
             return "next", None
@@ -427,6 +511,7 @@ def select_lyrics(meta: TrackMeta) -> tuple[str, str | None]:
             return "tree", None
         elif lowered == "r":
             need_search = True
+            force_refresh = True
         elif lowered == "m":
             query = safe_input("New search query (title or 'Artist - Title'): ", default_text=last_query).strip()
             if query:
@@ -451,10 +536,18 @@ def select_lyrics(meta: TrackMeta) -> tuple[str, str | None]:
             if confirmed:
                 return "apply", confirmed
         elif choice.isdigit() and 1 <= int(choice) <= len(candidates):
-            selected = candidates[int(choice) - 1]
-            confirmed = inspect_and_confirm(selected.text, source_label=f"Entry #{choice} ({selected.provider})")
+            index = int(choice)
+            selected = candidates[index - 1]
+            confirmed = inspect_and_confirm(
+                selected.text, source_label=describe_candidate(index, selected)
+            )
             if confirmed:
                 return "apply", confirmed
+            # Keep the inspected entry highlighted so it is obvious where the
+            # user came back from, and let Enter confirm it. Stored on the
+            # cache entry so it survives leaving and returning to the track.
+            if entry:
+                entry.highlight = index
         else:
             warn("Unknown option.")
 
@@ -521,8 +614,9 @@ def run_batch(files: list[Path], cache: MetadataCache, overwrite: bool, dry_run:
             skipped += 1
             continue
         if dry_run:
-            print(f"{StyleUI.CYAN}{prefix}: would apply {candidate.provider} "
-                  f"({'±%ds' % candidate.diff if candidate.has_duration else 'no duration'}).{StyleUI.RESET}")
+            position = report.candidates.index(candidate) + 1
+            print(f"{StyleUI.CYAN}{prefix}: would apply "
+                  f"{describe_candidate(position, candidate)}.{StyleUI.RESET}")
             applied += 1
             continue
 
@@ -534,7 +628,8 @@ def run_batch(files: list[Path], cache: MetadataCache, overwrite: bool, dry_run:
             continue
 
         cache.invalidate(path)
-        success(f"{prefix}: tagged from {candidate.provider}.")
+        position = report.candidates.index(candidate) + 1
+        success(f"{prefix}: tagged with {describe_candidate(position, candidate)}.")
         applied += 1
 
     print_banner("Batch summary")
@@ -546,6 +641,9 @@ def run_batch(files: list[Path], cache: MetadataCache, overwrite: bool, dry_run:
 
 # --- interactive driver ------------------------------------------------------
 def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> int:
+    search_cache = providers.SearchCache(
+        int(config.get("settings", "search_cache_entries", 64))
+    )
     current_index = 0
     show_tree = True
 
@@ -553,9 +651,14 @@ def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> 
         if show_tree:
             display_tree(files, base_dir, cache)
             print(f"\n{StyleUI.BOLD}Current folder:{StyleUI.RESET} {StyleUI.GRAY}{base_dir}{StyleUI.RESET}")
-            print(f"{StyleUI.BOLD}Navigation Options:{StyleUI.RESET}")
-            print(f"  [{StyleUI.GREEN}1-{len(files)}{StyleUI.RESET}] Jump to Song       [{StyleUI.CYAN}Enter{StyleUI.RESET}] Start with first song")
-            print(f"  [{StyleUI.CYAN}c{StyleUI.RESET}] Change directory     [{StyleUI.RED}q{StyleUI.RESET}] Quit Program")
+            print_primary_action("Enter", "Start with the first track")
+            print_menu([
+                ("Navigate", [
+                    (f"1-{len(files)}", "Jump to track"),
+                    ("c", "Change directory"),
+                    ("q", "Quit"),
+                ]),
+            ])
 
             choice = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
             if choice == "q":
@@ -599,8 +702,14 @@ def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> 
 
         if not meta.is_taggable:
             warn("Incomplete tags: title or artist missing.")
-            print(f"  [{StyleUI.YELLOW}p{StyleUI.RESET}] Prev Track    [{StyleUI.YELLOW}s{StyleUI.RESET}] Next Track    "
-                  f"[{StyleUI.BLUE}t{StyleUI.RESET}] Tree Overview    [{StyleUI.RED}q{StyleUI.RESET}] Quit")
+            print_menu([
+                ("Navigate", [
+                    ("p", "Previous track"),
+                    ("s", "Next track"),
+                    ("t", "Tree overview"),
+                    ("q", "Quit"),
+                ]),
+            ])
             action = safe_input(f"{StyleUI.BOLD}Action: {StyleUI.RESET}").strip().lower()
             if action == "q":
                 exit_script()
@@ -628,7 +737,7 @@ def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> 
                 current_index += 1
                 continue
 
-        action, payload = select_lyrics(meta)
+        action, payload = select_lyrics(meta, search_cache)
 
         if action == "tree":
             show_tree = True
@@ -643,6 +752,9 @@ def run_interactive(files: list[Path], base_dir: Path, cache: MetadataCache) -> 
                 error(str(exc))
                 continue
             cache.invalidate(path)
+            search_cache.discard(providers.SearchCache.key(
+                meta.title, meta.artist, meta.album, meta.duration
+            ))
             success("✓ Lyrics successfully embedded into file.")
             current_index += 1
         else:

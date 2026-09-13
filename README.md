@@ -2,7 +2,7 @@
 
 Interactive CLI utility for Linux, macOS and Windows to search, inspect, romanize and embed synchronized (`.lrc`) and plain lyrics into FLAC, MP3, OGG Vorbis, Opus and M4A files.
 
-Version 1.0.1 · Python 3.10+ · MIT
+Version 1.0.2 · Python 3.10+ · MIT
 
 ---
 
@@ -15,6 +15,7 @@ Version 1.0.1 · Python 3.10+ · MIT
 * **Smart tag cleaning & aliases** — strips features (`feat. …`), filters localized bracketed subtitles out of queries, and resolves group acronyms (*Tomorrow X Together* ↔ *TXT*) with word-boundary matching.
 * **Romanization** with automatic script detection, preserving LRC timestamps: Hangul → Romaja, Kanji/Kana → Hepburn Rōmaji, Hanzi → Pīnyīn, and any other script → Latin via `anyascii`. Lines containing several scripts at once are split into runs and converted per run, and text that is already Latin is never touched — so passes can be combined without destroying each other's output.
 * **Batch mode** — `--auto` tags every track with a confident match; `--dry-run` reports without writing.
+* **Search results are cached for the session** — leaving a track and coming back to it reuses the previous result instead of querying the providers again. `R` forces a fresh search.
 * **Safeguards** — metadata cached by modification time, recursion depth and file-count caps, Tab-completing path prompt, colour output honouring `NO_COLOR` and non-TTY pipes.
 
 ---
@@ -116,13 +117,18 @@ fetch-lyrics ~/Music/Artist --auto --dry-run
 
 | Key | Action |
 |---|---|
+| `Enter` | Save the highlighted entry — shown only when one is highlighted |
 | `1`–`N` | Inspect and select a candidate |
 | `m` | Adjust the search query (pre-filled) |
-| `R` | Repeat the search |
+| `R` | Repeat the search, bypassing the cache |
 | `n` | Create lyrics from scratch in your editor |
 | `p` / `s` | Previous / next track |
 | `t` | Back to the tree overview |
 | `q` | Quit |
+
+An entry is marked `✓exact` when it came back from LRCLIB's `/get` endpoint, which is queried with title, artist, album and — when the file has one — duration, and returns the canonical record rather than a ranked guess. Note that a second `/get` runs without the duration, so `✓exact` on its own does not prove the length was checked; the duration column shows that separately.
+
+The highlighted entry is marked with `▶` and named in full on the `Enter` line. A search highlights its top result when that result is an exact match; inspecting an entry and returning with `b` highlights that one instead, so it is always visible where you left off.
 
 **Inspection** (candidate or manual entry)
 
@@ -227,6 +233,7 @@ An invalid or unreadable file produces a warning and the defaults are used — i
 | `non_latin_ratio_threshold` | Share of non-Latin letters above which lyrics count as original-script |
 | `max_search_depth` | Directory levels to descend. `3` collects files up to three levels below the start directory; deeper directories are not entered. |
 | `max_file_count` | Abort the scan above this many files and ask for a narrower path |
+| `search_cache_entries` | How many past searches to keep in memory for the session |
 | `prefer_latin` | `true` ranks romanized versions first; `false` prefers the original script |
 | `sort_by_tags` | `true` orders by disc/track number; `false` uses natural filename order (`Track 2` before `Track 10`) |
 | `write_sidecar_lrc` | Also write a companion `.lrc` next to each track |

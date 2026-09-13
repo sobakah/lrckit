@@ -3,6 +3,47 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.2] — 2026-09-13
+
+### Added
+
+* **Session-wide search cache.** Results are kept per query, so stepping away
+  from a track and coming back reuses them instead of querying the providers
+  again; the highlighted entry is restored along with them. `R` forces a fresh
+  search, and a successful save drops the entry. Capped by
+  `settings.search_cache_entries` (default 64, least recently used evicted).
+* **Confirm the highlighted entry with Enter.** When a search returns a match
+  from LRCLIB's exact endpoint, that entry is highlighted on arrival and
+  `Enter` saves it without further keystrokes. The `Enter` line is only shown
+  when an entry is actually highlighted.
+
+### Changed
+
+* **The selected entry is visible.** The highlighted row is marked with `▶`
+  and its number and title are emphasised; the `Enter` line names it in full
+  with artist, title, provider and properties, so the selection is readable
+  without colour.
+* **Returning from an inspected entry keeps it highlighted.** Looking at an
+  entry and going back with `b` moves the highlight to that entry, so it is
+  clear where you left off and `Enter` confirms it.
+* **Menus are grouped into labelled columns.** Every menu is rendered by one
+  layout function that arranges options in aligned columns under headings such
+  as *Edit*, *File* and *Navigate*. Column count and width follow the terminal,
+  so the list reflows instead of overflowing on a narrow window, and key
+  colours now follow meaning — green for actions, yellow for navigation, red
+  for quitting and deleting.
+* The action `Enter` would take is printed on its own line above the menu.
+* Batch mode names the entry it applied or would apply, instead of reporting
+  only the provider.
+
+### Fixed
+
+* **The `exact` flag was assigned at random when a record came back from both
+  LRCLIB endpoints.** `/get` and `/search` frequently return the same track,
+  and since the queries run concurrently the first response to arrive decided
+  the flag. Exactness is now merged across all responses for a record, so the
+  same search no longer produces a different marking from run to run.
+
 ## [1.0.1] — 2026-09-13
 
 Romanization of songs that mix several writing systems. Every fix below was
@@ -81,5 +122,6 @@ See the README for the full feature set. Highlights: concurrent queries against
 LRCLIB, NetEase and `syncedlyrics`; confidence-aware ranking; batch mode with
 `--auto` and `--dry-run`; recursive configuration merging; and a pytest suite.
 
+[1.0.2]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.2
 [1.0.1]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.1
 [1.0.0]: https://github.com/<username>/fetch-lyrics/releases/tag/v1.0.0

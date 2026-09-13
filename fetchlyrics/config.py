@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 PROJECT_URL = "https://github.com/<username>/fetch-lyrics"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -55,6 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "non_latin_ratio_threshold": 0.25,
         "max_search_depth": 3,
         "max_file_count": 250,
+        "search_cache_entries": 64,
         "prefer_latin": True,
         "sort_by_tags": False,
         "write_sidecar_lrc": False,

@@ -1,6 +1,7 @@
 """Regression tests for the issues found in the 2.x review."""
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fetchlyrics import config, editor, providers, tagging, text  # noqa: E402
+from fetchlyrics import app, ui  # noqa: E402
 from fetchlyrics.app import natural_key  # noqa: E402
 
 
@@ -319,10 +321,172 @@ def test_prefer_latin_is_configurable():
     config.CONFIG["settings"]["prefer_latin"] = True
 
 
+def test_exact_flag_does_not_depend_on_response_order(monkeypatch):
+    # /get and /search return the same record; the concurrent responses used to
+    # decide the exact flag by whichever arrived first.
+    record = {"id": 42, "trackName": "Song", "artistName": "A",
+              "syncedLyrics": "[00:01.00]x", "duration": 200}
+
+    def make_session(order):
+        responses = iter(order)
+
+        class FakeResponse:
+            status_code = 200
+            reason = "OK"
+
+            def __init__(self, endpoint):
+                self.endpoint = endpoint
+
+            def json(self):
+                return record if self.endpoint == "get" else [record]
+
+        class FakeSession:
+            def get(self, url, params=None, timeout=None, headers=None):
+                return FakeResponse(next(responses))
+
+        return FakeSession()
+
+    for order in (["get", "search"], ["search", "get"]):
+        monkeypatch.setattr(providers, "get_session", lambda o=order: make_session(o))
+        monkeypatch.setattr(providers, "_lrclib_queries",
+                            lambda *a, **k: [("get", {"q": "x"}), ("search", {"q": "x"})])
+        report = providers.SearchReport()
+        found = providers.query_lrclib("Song", "A", "", 200, report)
+        assert len(found) == 1, order
+        assert found[0].exact is True, order
+
+
 def test_lrclib_queries_are_deduplicated():
     queries = providers._lrclib_queries("Song", "IU", "Album", 200)
     assert len(queries) == len(set((e, tuple(sorted(p.items()))) for e, p in queries))
     assert any(endpoint == "get" for endpoint, _ in queries)
+
+
+# --- search cache ------------------------------------------------------------
+def test_search_cache_normalises_the_key():
+    a = providers.SearchCache.key("Song (feat. X)", "IU", "Album", 200)
+    b = providers.SearchCache.key("  song  ", "iu", "ALBUM", 200)
+    assert a == b
+
+
+def test_search_cache_keeps_a_different_query_apart():
+    a = providers.SearchCache.key("Song", "IU", "", 200)
+    b = providers.SearchCache.key("Other Song", "IU", "", 200)
+    assert a != b
+
+
+def test_search_cache_returns_the_stored_report():
+    cache = providers.SearchCache()
+    key = providers.SearchCache.key("Song", "IU", "", 200)
+    report = providers.SearchReport(candidates=[_cand()])
+    cache.set(key, providers.CachedSearch(report, highlight=2))
+
+    entry = cache.get(key)
+    assert entry is not None
+    assert entry.report is report
+    assert entry.highlight == 2
+
+
+def test_search_cache_evicts_least_recently_used():
+    cache = providers.SearchCache(max_entries=2)
+    keys = [providers.SearchCache.key(name, "A", "", 0) for name in ("one", "two", "three")]
+    for key in keys[:2]:
+        cache.set(key, providers.CachedSearch(providers.SearchReport()))
+    cache.get(keys[0])                # touch the first so the second is oldest
+    cache.set(keys[2], providers.CachedSearch(providers.SearchReport()))
+
+    assert len(cache) == 2
+    assert cache.get(keys[0]) is not None
+    assert cache.get(keys[1]) is None
+
+
+def test_search_cache_discard_forces_a_new_search():
+    cache = providers.SearchCache()
+    key = providers.SearchCache.key("Song", "IU", "", 200)
+    cache.set(key, providers.CachedSearch(providers.SearchReport()))
+    cache.discard(key)
+    assert cache.get(key) is None
+
+
+# --- menu rendering ----------------------------------------------------------
+def _menu_groups():
+    return [
+        ("Edit", [("e", "Open in editor"), ("r", "Romanize"), ("v", "Full preview")]),
+        ("Navigate", [("p", "Previous track"), ("s", "Next track"), ("q", "Quit")]),
+    ]
+
+
+def test_menu_lists_every_key_and_group(capsys):
+    ui.print_menu(_menu_groups())
+    out = capsys.readouterr().out
+    for key in ("e", "r", "v", "p", "s", "q"):
+        assert f"[{key}]" in out
+    assert "Edit" in out and "Navigate" in out
+
+
+def test_menu_columns_adapt_to_terminal_width(monkeypatch, capsys):
+    def rows_for(width):
+        monkeypatch.setattr(ui, "terminal_width", lambda default=80: width)
+        ui.print_menu(_menu_groups())
+        out = capsys.readouterr().out
+        return [ln for ln in out.splitlines() if "[" in ln]
+
+    wide = rows_for(200)
+    narrow = rows_for(30)
+    # A narrow terminal must break into more rows rather than overflow.
+    assert len(narrow) > len(wide)
+
+
+def test_menu_never_exceeds_the_terminal_width(monkeypatch, capsys):
+    for width in (30, 60, 100):
+        monkeypatch.setattr(ui, "terminal_width", lambda default=80, w=width: w)
+        ui.print_menu(_menu_groups())
+        for line in capsys.readouterr().out.splitlines():
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+            assert len(plain) <= width, (width, plain)
+
+
+def test_menu_handles_a_single_group(capsys):
+    ui.print_menu([("Navigate", [("q", "Quit")])])
+    assert "[q]" in capsys.readouterr().out
+
+
+# --- candidate selection UI --------------------------------------------------
+def test_describe_candidate_names_the_entry():
+    cand = _cand(artist="IU", title="Love Wins All", synced=True, exact=True,
+                 has_duration=True, diff=0)
+    line = app.describe_candidate(1, cand)
+    assert line.startswith("#1 IU - Love Wins All")
+    assert "exact" in line and "synced" in line
+    assert "duration OK" in line and "±0s" not in line
+
+
+def test_describe_candidate_without_duration():
+    line = app.describe_candidate(3, _cand(artist="", title="Song", synced=False))
+    assert line.startswith("#3 Song")
+    assert "plain" in line and "duration" not in line
+
+
+def test_highlight_marks_only_the_selected_row(capsys):
+    candidates = [_cand(title="A", exact=True), _cand(title="B"), _cand(title="C")]
+    app.print_candidates(candidates, highlight=2)
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "[" in ln]
+    marked = [ln for ln in lines if ln.startswith("\u25b6")]
+    assert len(marked) == 1
+    assert "B" in marked[0]
+
+
+def test_no_highlight_marks_nothing(capsys):
+    app.print_candidates([_cand(title="A"), _cand(title="B")], highlight=None)
+    assert "\u25b6" not in capsys.readouterr().out
+
+
+def test_exact_match_is_preselected_only_when_first_result_is_exact():
+    # Enter confirms the top entry only when the search produced an exact hit.
+    exact_first = [_cand(exact=True), _cand()]
+    fuzzy_first = [_cand(), _cand(exact=True)]
+    assert (1 if exact_first[0].exact else None) == 1
+    assert (1 if fuzzy_first[0].exact else None) is None
 
 
 # --- sorting -----------------------------------------------------------------

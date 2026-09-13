@@ -190,6 +190,62 @@ def transient(msg: str):
     return _Transient()
 
 
+# --- menus -------------------------------------------------------------------
+def print_menu(groups: list[tuple[str, list[tuple[str, str]]]], lead: str | None = None) -> None:
+    """Render keyboard options as labelled groups in aligned columns.
+
+    *groups* is a list of (group title, [(key, label), ...]). Column count and
+    width adapt to the terminal, so a long option list stays readable instead
+    of running into one wall of text.
+    """
+    entries = [entry for _, items in groups for entry in items]
+    if not entries:
+        return
+
+    key_width = max(len(key) for key, _ in entries)
+    label_width = max(len(label) for _, label in entries)
+    cell_width = key_width + label_width + 4  # "[k] label"
+    gap = 3
+    usable = max(20, terminal_width() - 2)
+    columns = max(1, (usable + gap) // (cell_width + gap))
+
+    if lead:
+        print(f"\n{lead}")
+    else:
+        print()
+
+    for title, items in groups:
+        if title:
+            print(f"{StyleUI.GRAY}{title}{StyleUI.RESET}")
+        for start in range(0, len(items), columns):
+            row = items[start:start + columns]
+            cells = []
+            for position, (key, label) in enumerate(row):
+                colored = f"[{_key_color(key)}{key}{StyleUI.RESET}]{' ' * (key_width - len(key))} {label}"
+                padding = cell_width - (key_width + len(label) + 4)
+                last = position == len(row) - 1
+                cells.append(colored + ("" if last else " " * (padding + gap)))
+            print("  " + "".join(cells).rstrip())
+
+
+_DESTRUCTIVE_KEYS = {"q", "d"}
+_NAVIGATION_KEYS = {"p", "s", "t", "b", "c"}
+
+
+def _key_color(key: str) -> str:
+    lowered = key.lower()
+    if lowered in _DESTRUCTIVE_KEYS:
+        return StyleUI.RED
+    if lowered in _NAVIGATION_KEYS:
+        return StyleUI.YELLOW
+    return StyleUI.GREEN
+
+
+def print_primary_action(key: str, description: str) -> None:
+    """Highlight the action Enter would take, above the regular menu."""
+    print(f"\n  [{StyleUI.CYAN}{StyleUI.BOLD}{key}{StyleUI.RESET}] {StyleUI.BOLD}{description}{StyleUI.RESET}")
+
+
 # --- path completion ---------------------------------------------------------
 def complete_path(text: str, state: int):
     expanded = os.path.expanduser(text)

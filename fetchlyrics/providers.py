@@ -8,6 +8,7 @@ instead of the sum of up to thirty sequential requests.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -195,7 +196,7 @@ def query_lrclib(title: str, artist: str, album: str, duration: int, report: Sea
         return endpoint, payload if isinstance(payload, list) else []
 
     items: list[tuple[str, dict]] = []
-    seen_ids: set = set()
+    seen_ids: dict = {}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(fetch, job): job for job in queries}
@@ -209,10 +210,19 @@ def query_lrclib(title: str, artist: str, album: str, duration: int, report: Sea
                 if not isinstance(item, dict):
                     continue
                 item_id = item.get("id")
-                if item_id is not None:
-                    if item_id in seen_ids:
-                        continue
-                    seen_ids.add(item_id)
+                if item_id is None:
+                    items.append((endpoint, item))
+                    continue
+                if item_id in seen_ids:
+                    # The same record often comes back from /get and /search at
+                    # once. Since the queries run concurrently, keeping the
+                    # first endpoint to arrive would flag a record as exact or
+                    # not at random, so exactness is merged across responses.
+                    if endpoint == "get":
+                        position = seen_ids[item_id]
+                        items[position] = ("get", items[position][1])
+                    continue
+                seen_ids[item_id] = len(items)
                 items.append((endpoint, item))
 
     candidates = []
@@ -393,6 +403,59 @@ def rank_key(candidate: Candidate):
         duration_rank,
         candidate.diff,
     )
+
+
+@dataclass
+class CachedSearch:
+    """A finished search plus the entry that was highlighted when leaving it."""
+
+    report: SearchReport
+    highlight: int | None = None
+
+
+class SearchCache:
+    """Remembers searches for the duration of the session.
+
+    Walking back to a track that was already looked at should not cost another
+    round of provider queries. Entries are keyed by the query actually sent, so
+    an adjusted query gets its own slot, and evicted least-recently-used once
+    the cap is reached.
+    """
+
+    def __init__(self, max_entries: int = 64) -> None:
+        self.max_entries = max(1, int(max_entries))
+        self._store: OrderedDict[tuple, CachedSearch] = OrderedDict()
+
+    @staticmethod
+    def key(title: str, artist: str, album: str, duration: int) -> tuple:
+        return (
+            clean_tag(title).lower(),
+            clean_tag(artist).lower(),
+            clean_tag(album).lower(),
+            int(duration or 0),
+        )
+
+    def get(self, key: tuple) -> CachedSearch | None:
+        entry = self._store.get(key)
+        if entry is not None:
+            self._store.move_to_end(key)
+        return entry
+
+    def set(self, key: tuple, entry: CachedSearch) -> CachedSearch:
+        self._store[key] = entry
+        self._store.move_to_end(key)
+        while len(self._store) > self.max_entries:
+            self._store.popitem(last=False)
+        return entry
+
+    def discard(self, key: tuple) -> None:
+        self._store.pop(key, None)
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __len__(self) -> int:
+        return len(self._store)
 
 
 def collect_candidates(title: str, artist: str, album: str, duration: int) -> SearchReport:
