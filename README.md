@@ -25,9 +25,9 @@ Version 1.0.2 · Python 3.10+ · MIT
 ### pipx (recommended)
 
 ```bash
-pipx install git+https://github.com/<username>/fetch-lyrics.git
+pipx install git+https://github.com/sobakah/fetch_lyrics.git
 # with romanization and the extra provider engine:
-pipx install "fetch-lyrics[all] @ git+https://github.com/<username>/fetch-lyrics.git"
+pipx install "fetch-lyrics[all] @ git+https://github.com/sobakah/fetch_lyrics.git"
 ```
 
 This installs a `fetch-lyrics` command on your `PATH`.
